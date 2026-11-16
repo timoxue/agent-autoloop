@@ -256,7 +256,7 @@ MCP 客户端的启动程序填 `node`，参数为本机引擎绝对路径 `bin/
 
 MCP 服务不区分调用方，都按本人记录（`answer` 记成本人，`emit` 不带层数）。不要把它配进接单程序启动的 CLI 的用户级配置，否则一轮能自己回答自己的卡片。本机有成员密钥、没有本人密钥时它是成员模式，只有 `me`、`answer`、`say` 三个工具，都按这个成员记录，同样不要配进接单程序启动的 CLI。
 
-`agent-autoloop key remove <source|worker|channel|owner|person> <名字>` 立即收回对应密钥（成员密钥的名字是人的编号），长轮询和日志订阅也立即失效；已经领到的活仍可用这一轮的独立 token 交结果。
+`agent-autoloop key remove <source|worker|channel|owner|person> <名字>` 立即收回对应密钥（成员密钥的名字是人的编号），长轮询和日志订阅也立即失效，正传到一半的请求也不生效；已经领到的活仍可用这一轮的独立 token 交结果。`agent-autoloop key new` 给同一个名字再建一把，旧的也立即作废，只是旧密钥正在等的长轮询要到这次等待结束（最多 50 秒）才断开，这中间领不到活；要立刻断开就先 `key remove`。
 
 ## 放到服务器、加电脑
 
