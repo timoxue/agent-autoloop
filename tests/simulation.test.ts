@@ -6,7 +6,10 @@
 // replay), so what goes by the rules of an earlier moment is never met; a replay that hands over a message from someone
 // the rules no longer take it from goes unnoticed. No door's key is ever taken back or replaced in the simulation, and no
 // link stops opening its card, so a hub that decides what came in on a dead one is never met; such a hub, or one that
-// lets a source's door record what only the clock does, goes unnoticed.
+// lets a source's door record what only the clock does, goes unnoticed. No round is ever lost and then passed by a
+// newer one of its matter before it hands in, so a hub that lets its late receipt put the matter back, or one that
+// drops the receipt of a round nothing passed, is never met; such a hub goes unnoticed. So does one that cuts the late
+// receipt and leaves what that round had taken (events, an answer, a look-again come due) with it, for no one.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { simulate } from "../sim/random.ts";
@@ -30,6 +33,8 @@ test("200000 deterministic fault steps preserve safety and recovered work termin
     "rules",
     "keys",
     "link",
+    "late",
+    "passed",
   ])
     assert.ok(result.faults[fault] > 0, fault);
   assert.ok(result.completed > 0);
@@ -150,6 +155,64 @@ test("source checks reject a moment of the clock's that came in through a source
   const log = structuredClone(w.log);
   for (const f of log) for (const c of f.changes) if (c.table === "events" && c.row) c.row.source = "schedule";
   assert.throws(() => invariants(evolve(new World().view, log.slice(1)), log), /定时/);
+});
+
+/** A round of rule one its machine stopped mentioning, and a newer round of the same matter handed out since. */
+function passedRound() {
+  const w = new World();
+  w.call("ingest", "app", { id: "a", type: "one", subject: "#1" });
+  const old = w.claim("w1", "first")!;
+  w.advance(360000);
+  w.call("heartbeat", "w1", []);
+  w.alarm();
+  w.call("ingest", "app", { id: "b", type: "one", subject: "#1" });
+  const newer = w.claim("w1", "second")!;
+  assert.equal(w.view.get("runs", old.run)!.state, "unknown");
+  return { w, old, newer };
+}
+const booking = { outcome: "done", later: [{ key: "follow", at: "2030-01-01T00:00:00Z", about: "复查" }] };
+
+test("late checks reject a hub that lets a round its matter has passed book a look-again", () => {
+  const { w, old } = passedRound();
+  assert.equal(w.finish(old.run, booking).rejected.length, 1);
+  // As a hub that kept no record would have it: a round the simulation knows was passed, the hub doesn't.
+  const loose = new World();
+  loose.call("ingest", "app", { id: "a", type: "one", subject: "#1" });
+  const job = loose.claim("w1", "first")!;
+  loose.passer.set(job.run, 99);
+  assert.throws(() => loose.finish(job.run, booking), /迟到的回执改了事项的复查/);
+});
+
+test("late checks reject a hub that drops what a round nothing passed asked for", () => {
+  const { w, old } = passedRound();
+  // By the simulation's own record this round is still the newest of its matter; the hub has it marked as passed.
+  w.passer.delete(old.run);
+  assert.throws(() => w.finish(old.run, booking), /没被超过/);
+});
+
+test("late checks reject a hub that leaves what a lost round took with it, whether or not it ever hands in", () => {
+  const { w, old, newer } = passedRound();
+  // As a hub that handed nothing on would have written the claim: the same log without the events changing hands.
+  const log = structuredClone(w.log);
+  const claim = log.findLast((f) => f.type === "claimNext")!;
+  assert.ok(claim.changes.some((c) => c.table === "run_events" && c.key.startsWith(`${newer.run}:`)));
+  claim.changes = claim.changes.filter((c) => c.table !== "run_events" && c.table !== "due");
+  assert.throws(() => invariants(evolve(empty(), log), log, undefined, w.passer), /已经被接手的一轮名下/);
+  // The old round never comes back; the record of who took its matter is enough.
+  assert.equal(w.view.get("runs", old.run)!.state, "unknown");
+});
+
+test("event checks reject an event that two rounds of one rule hold", () => {
+  const w = new World();
+  w.call("ingest", "app", { id: "a", type: "one", subject: "#1" });
+  const log = structuredClone(w.log);
+  const [link] = log.at(-1)!.changes.filter((c) => c.table === "run_events");
+  const twin = { ...structuredClone(log.at(-1)!.changes.find((c) => c.table === "runs")!), key: "9" };
+  twin.row!.id = 9;
+  log
+    .at(-1)!
+    .changes.push(twin, { table: "run_events", key: `9:${link.row!.event_id}`, row: { ...link.row!, run_id: 9 } });
+  assert.throws(() => invariants(evolve(empty(), log), log), /两轮/);
 });
 
 test("the simulation catches omitted deadlines that strand deferred work", () => {

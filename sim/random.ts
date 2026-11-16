@@ -29,20 +29,58 @@ export function simulate(seed = 0x5eed, steps = 200000) {
     rules: 0,
     keys: 0,
     link: 0,
+    late: 0,
+    passed: 0,
   };
   let world = new World();
   let completed = 0;
   const receipts: { id: number; token: string; body: object; ack: object }[] = [];
+  /** What a round hands in: it failed, or it ended, sometimes asking the hub for some of everything a receipt can. */
+  const receipt = (r: { id: number; grp: string; claimed_at: string }, how?: "failed" | "asking") => {
+    if (how === "failed" || (!how && rng(4) === 0))
+      // A run that didn't get through may still tell someone, and is then tried again, perhaps on another machine.
+      return {
+        outcome: "failed",
+        ...(rng(2) === 0 && { notice: [{ title: "卡住了", text: "内容", key: `stuck-${r.id}`, to: "p1" }] }),
+      };
+    if (!how && rng(3) !== 0) return { outcome: "done" };
+    // Rule one may name p1, rule two no one: there it's turned down and no card is made.
+    const ask = { title: "选择", text: "内容", options: ["甲", "乙"], key: `card-${r.id}` };
+    const open = rows(world.view, "cards").filter((c) => c.state === "open");
+    // One it may close, when there is one: its group's, from its source, there before it was handed out.
+    const near = open.filter((c) => c.grp === r.grp && c.source === "app" && c.created_at <= r.claimed_at);
+    const card = (near.length ? near : open)[rng(Math.max(near.length || open.length, 1))];
+    // One look-again to a matter, under one name: booked, moved, or cancelled.
+    const later = rng(4)
+      ? { at: new Date(world.now + 60000 + rng(60000)).toISOString(), about: "复查" }
+      : { cancel: true };
+    return {
+      outcome: "done",
+      ...(rng(2) && { ask: [{ ...ask, ...(rng(2) && { to: rng(2) ? "p1" : "p2" }) }] }),
+      ...(rng(3) === 0 && { notice: [{ title: "看一眼", text: "内容", key: `note-${r.id}`, fyi: rng(2) === 0 }] }),
+      ...(rng(2) && card && { resolve: [{ card: card.id, reason: "核实过了" }] }),
+      ...(rng(4) && { later: [{ key: "follow", ...later }] }),
+      // Rule one may send this type, and nothing takes it.
+      ...(rng(3) === 0 && { events: [{ id: `made-${r.id}-${rng(4)}`, type: "made", subject: `#${rng(4)}` }] }),
+    };
+  };
+  const handIn = (r: { id: number; grp: string; claimed_at: string; issued: number }, how?: "failed" | "asking") => {
+    const body = receipt(r, how);
+    const token = credential(environment, "run", r.id, r.issued);
+    const ack = world.handIn(r.id, token, body);
+    receipts.push({ id: r.id, token, body, ack });
+  };
   for (let step = 0; step < steps; step++) {
     try {
       if (step && step % 128 === 0) {
         completed += world.recover();
+        faults.passed += world.late;
         world.view.close();
         world = new World();
         receipts.length = 0;
       }
       world.advance(rng(30000));
-      const op = rng(17);
+      const op = rng(18);
       const live = rows(world.view, "runs").filter((r) => ["claimed", "unknown"].includes(r.state));
       if (op < 3) {
         const id = String(rng(16));
@@ -69,31 +107,39 @@ export function simulate(seed = 0x5eed, steps = 200000) {
           assert.equal(again.run, job.run);
         }
       } else if (op === 5 && live.length) {
-        const r = live[rng(live.length)];
-        const fail = rng(4) === 0;
-        const body = {
-          outcome: fail ? "failed" : "done",
-          // A run that didn't get through may still tell someone, and is then tried again, perhaps on another machine.
-          ...(fail && rng(2) === 0 && { notice: [{ title: "卡住了", text: "内容", key: `stuck-${r.id}`, to: "p1" }] }),
-          ...(!fail && rng(4) === 0
-            ? {
-                // Rule one may name p1, rule two no one: there it's turned down and no card is made.
-                ask: [
-                  {
-                    title: "选择",
-                    text: "内容",
-                    options: ["甲", "乙"],
-                    key: `card-${r.id}`,
-                    ...(rng(2) && { to: rng(2) ? "p1" : "p2" }),
-                  },
-                ],
-                later: [{ key: `timer-${r.id}`, at: new Date(world.now + 60000).toISOString(), about: "复查" }],
-              }
-            : {}),
-        };
-        const token = credential(environment, "run", r.id, r.issued);
-        const ack = world.handIn(r.id, token, body);
-        receipts.push({ id: r.id, token, body, ack });
+        handIn(live[rng(live.length)] as any);
+      } else if (op === 17) {
+        faults.late++;
+        // A round its machine stops mentioning while it keeps coming: six minutes on the hub no longer knows if it's
+        // going, and lets its group go on. Then something comes in for the same matter, or for another subject of its
+        // rule, or for the other rule on its subject, and whoever can takes it. The lost round hands in after that, now
+        // or whenever its turn comes: only where its own matter went to a newer round has it been passed.
+        const held = live.filter((r) => r.state === "claimed" && r.rule !== "three");
+        const lost = held[rng(Math.max(held.length, 1))];
+        if (lost) {
+          const machine = world.takenBy.get(lost.id)!;
+          const others = live.filter((r) => r.id !== lost.id && world.takenBy.get(r.id) === machine).map((r) => r.id);
+          world.advance(360000);
+          world.call("heartbeat", machine, others);
+          world.alarm();
+          const where = rng(3);
+          const subject = where === 1 ? `#${rng(4)}` : lost.lane;
+          const type = where === 2 ? (lost.rule === "one" ? "two" : "one") : lost.rule;
+          world.call("ingest", "app", { id: `again-${step}`, type, subject });
+          // Each machine takes what it's given, older work first, until it has the round for what just came in.
+          const came = world.matter(rows(world.view, "runs", { state: "queued" }).at(-1)?.id ?? 0);
+          for (const worker of ["w1", "w2", "w3"]) {
+            world.call("heartbeat", worker, worker === machine ? others : []);
+            for (let n = 0; n < 3; n++) {
+              const job = world.claim(worker, `again-${step}-${worker}-${n}`);
+              if (!job || world.matter(job.run) === came) break;
+            }
+          }
+          const now = world.view.get("runs", lost.id)!;
+          // Asking for something, mostly; or failed, to be tried again as the newest round of its matter.
+          const how = ([undefined, "failed", "asking", "asking"] as const)[rng(4)];
+          if (rng(2) && ["claimed", "unknown"].includes(now.state)) handIn(now as any, how);
+        }
       } else if (op === 6 && receipts.length) {
         faults.lost++;
         const r = receipts[rng(receipts.length)];
@@ -281,6 +327,7 @@ export function simulate(seed = 0x5eed, steps = 200000) {
     }
   }
   completed += world.recover();
+  faults.passed += world.late;
   world.view.close();
   const ms = performance.now() - start;
   return { seed, steps, epoch: 128, faults, completed, ms, stepsPerSecond: Math.round((steps * 1000) / ms) };

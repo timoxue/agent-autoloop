@@ -43,8 +43,82 @@ export function replay(log: Fact[]): Snapshot {
 export function admitted(good: boolean) {
   assert.ok(good, "用已经作废的密钥或打不开的链接提交成了");
 }
-export function invariants(current: View, log: Fact[], before?: Snapshot) {
+const REQUESTS = ["ask", "notice", "resolve", "later", "events"];
+/**
+ * What a receipt may have written, by whether its round was still the one its matter was last handed to. `passer` is
+ * the first round the matter was handed to after this one, by the caller's own record of the claims it saw, in the
+ * order it saw them, and nothing the hub keeps or works out; none when this is still the newest. A round that a newer
+ * one has passed leaves the matter as the newer one has it: no look-again booked, moved or cancelled, no card made or
+ * closed, no event sent, and each thing it asked for turned down, naming that round. What it had taken went on with
+ * the matter, so it settles none of it: no answer marked carried out, no look-again that came due cleared. One that
+ * wasn't passed has its look-agains in effect.
+ */
+export function settled(
+  facts: Fact[],
+  before: Snapshot,
+  run: number,
+  passer: number | undefined,
+  result: Row,
+  ack: Row,
+) {
+  const changes = facts.flatMap((fact) => fact.changes);
+  const { rule, lane } = before.tables.runs[run];
+  const own = (row?: Row | null) => row?.rule === rule && row?.lane === lane;
+  if (passer === undefined) {
+    if (result.outcome !== "done") return;
+    for (const later of result.later ?? []) {
+      const key = (row?: Row | null) => own(row) && row!.key === later.key && row!.event_id === null;
+      const written = changes.filter(
+        ({ table, key: id, row }) => table === "timers" && key(row ?? before.tables.timers[id]),
+      );
+      const stands = later.cancel ? written.every(({ row }) => row === null) : written.some(({ row }) => row !== null);
+      assert.ok(stands, "没被超过的一轮，回执里的复查没生效");
+    }
+    return;
+  }
+  for (const { table, key, row } of changes) {
+    const was = before.tables[table][key];
+    if (table === "timers" && own(row ?? was))
+      assert.fail(was && was.event_id !== null ? "迟到的回执清掉了到期的复查，没人处理它" : "迟到的回执改了事项的复查");
+    if (table === "cards" && row?.state === "done" && was?.state !== "done")
+      assert.fail("迟到的回执把没人处理的回答记成了已执行");
+    if (table === "events") assert.ok(was, "迟到的回执发出了事件");
+    if (table !== "cards" || !row) continue;
+    // What the hub itself says about the run is the run's own.
+    if (!was) assert.ok(row.run_id !== run || row.key.startsWith(`run:${run}:`), "迟到的回执发出了卡片");
+    else if (was.state === "open" && row.state === "closed")
+      assert.notEqual(row.by, `第 ${run} 轮`, "迟到的回执结掉了卡片");
+  }
+  const asked = REQUESTS.reduce((count, what) => count + (result[what]?.length ?? 0), 0);
+  if (result.outcome === "cancelled") return;
+  const named = ack.rejected.filter((item: Row) => item.reason.includes(`第 ${passer} 轮`));
+  // Each thing once, for that reason alone: turned down for another as well, it was looked at as if it could count.
+  assert.ok(named.length === asked && ack.rejected.length === asked, "迟到的回执没说清哪些没生效、事项交给了哪一轮");
+  // One that failed runs again; one that ended has lost what it asked for, and the owner has to hear of it.
+  const told = (row?: Row | null) => row?.key === `run:${run}:late` && row.state === "open";
+  const hears = changes.some(({ table, row }) => table === "cards" && told(row)) || rows(before, "cards").some(told);
+  if (asked && result.outcome !== "failed") assert.ok(hears, "迟到的回执丢了东西，没告诉本人");
+}
+/**
+ * `passed` is the caller's own record of the rounds whose matter was handed to a newer round while they were out, kept
+ * from the moment that round was handed out, whether or not the passed one ever hands in. Every event a rule took is
+ * held by one round of that rule and no more, and answers and look-agains come due go where their events are. Where
+ * that round stands says what has become of them, and it is one of three things:
+ * - waiting: the round is queued, or out and not passed, and its receipt can still count;
+ * - handled: the round ended with a receipt that counted;
+ * - ended with their round: the owner stopped it, or it failed too often or lost its rule, and they stay on record
+ *   with it, set off again by nothing.
+ * It is never a round that was passed: its receipt counts for nothing, so held by it they would be nobody's.
+ */
+export function invariants(current: View, log: Fact[], before?: Snapshot, passed?: { has(run: number): boolean }) {
   const view = snapshot(current);
+  const holders = new Set<string>();
+  for (const link of rows(view, "run_events")) {
+    assert.ok(!passed?.has(link.run_id), "事件、回答或到期的复查留在了已经被接手的一轮名下");
+    const holder = JSON.stringify([link.event_id, view.tables.runs[link.run_id]?.rule]);
+    assert.ok(!holders.has(holder), "同一条事件被同一条规则的两轮拿着");
+    holders.add(holder);
+  }
   assert.deepEqual(view, replay(log), "日志重放记录不同");
   for (const [index, fact] of log.entries()) assert.equal(fact.seq, index + 1, "日志序号不连续");
   const events = rows(view, "events");

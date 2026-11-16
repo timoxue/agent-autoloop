@@ -46,6 +46,12 @@ export function formatWhy(id: number, facts: Fact[]) {
     if (row.finished_at && row.finished_at !== before?.finished_at) {
       add(row.finished_at, `结束：${row.summary || (row.state === "cancelled" ? "已停止" : "没有填写结论")}`);
     }
+    if (row.passed_by != null && row.passed_by !== before?.passed_by) {
+      add(
+        fact.at,
+        `这件事交给了第 ${row.passed_by} 轮，这一轮领走的事件、回答和到期的复查一起交给它：这一轮再交回，只记它自己的结局`,
+      );
+    }
     if (receipt && row.state === "queued" && row.attempts !== before?.attempts) {
       add(fact.at, `本次未完成：${row.error}；重试时间 ${time(row.not_before)}`);
     }

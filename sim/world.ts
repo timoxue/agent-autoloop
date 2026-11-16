@@ -3,7 +3,7 @@ import { decide, type Input } from "../kernel/decide.ts";
 import { empty, evolve, rows, snapshot, type Fact } from "../kernel/evolve.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { credential, digest } from "../kernel/credentials.ts";
-import { admitted, invariants } from "./invariants.ts";
+import { admitted, invariants, settled } from "./invariants.ts";
 
 export const environment = { secret: "test-simulation", publicUrl: "https://hub.test" };
 /** How the rules file stands: whether p2 is registered, which machine Agent a runs on, and whether the owner's channel
@@ -41,6 +41,8 @@ const written = ({ p2, aOn, links }: Shape) =>
         group: "shared",
         parallel: 2,
         people: ["*"],
+        // A type no rule takes: what a receipt sends is recorded and starts nothing.
+        emits: { source: "app", types: ["made"] },
       },
       {
         name: "two",
@@ -88,6 +90,14 @@ export class World {
   held: Record<string, string | undefined> = {};
   dead: Record<string, string> = {};
   issued = 0;
+  /** By the claims the simulation itself saw answered, in the order it saw them: the round each matter was handed to
+   * last, and for a round whose matter has been handed out again since, the first round it went to. And how many
+   * receipts came in from such a round asking for something. */
+  lead = new Map<string, number>();
+  passer = new Map<number, number>();
+  /** The rounds out now: handed out and not yet handed in. */
+  out = new Set<number>();
+  late = 0;
   takenBy = new Map<number, string>();
   madeOn = new Map<number, string | undefined>();
   constructor() {
@@ -166,15 +176,39 @@ export class World {
       if (c.to !== undefined && !this.madeOn.has(c.id)) this.madeOn.set(c.id, this.takenBy.get(id));
     return ack;
   }
+  /** The matter a run is of. */
+  matter(id: number) {
+    const run = this.view.get("runs", id);
+    return run && `${run.rule}\n${run.lane}`;
+  }
   act(input: Input) {
     const before = this.checked;
     const good = this.good(input);
+    const [id, , result] = input.args;
+    // Before the hub decides: which round, if any, this one's matter has been handed to since.
+    const passed = input.type === "finish" ? this.passer.get(id) : undefined;
     const d = decide(this.view, input, this.now, environment);
     admitted(good);
     this.log.push(...d.facts);
     this.view = evolve(this.view, d.facts);
     this.transitions++;
-    this.checked = invariants(this.view, this.log, before);
+    if (input.type === "claimNext" && d.value) {
+      const { run } = d.value;
+      const last = this.lead.get(this.matter(run)!);
+      // What it had taken went on with its matter: there's nothing for it to be handed out again with.
+      assert.ok(!this.passer.has(run), "被接手的一轮又被派了出去");
+      // Only a round still out is passed: one that ended, or went back to wait, keeps what it took.
+      if (last !== undefined && last !== run && this.out.has(last) && !this.passer.has(last))
+        this.passer.set(last, run);
+      this.out.add(run);
+      this.lead.set(this.matter(run)!, run);
+    }
+    if (input.type === "finish" && !d.value.duplicate) {
+      settled(d.facts, before, id, passed, result, d.value);
+      this.out.delete(id);
+      if (passed && ["ask", "notice", "resolve", "later", "events"].some((what) => result[what]?.length)) this.late++;
+    }
+    this.checked = invariants(this.view, this.log, before, this.passer);
     return d.value;
   }
   /** An input through its door, with the key that door goes by now. What the hub does of itself has none. */
@@ -193,7 +227,7 @@ export class World {
   restart() {
     this.view.close();
     this.view = evolve(empty(), this.log);
-    this.checked = invariants(this.view, this.log);
+    this.checked = invariants(this.view, this.log, undefined, this.passer);
     this.transitions++;
   }
   alarm() {
