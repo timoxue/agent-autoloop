@@ -3,7 +3,10 @@ export type Job = {
   run: number;
   token: string;
   attempt: number;
-  rule: Pick<Rule, "name" | "cwd" | "skill" | "prompt" | "title" | "emits">;
+  /** people: whom its receipts may address a card to; only there when the rule allows any. */
+  rule: Pick<Rule, "name" | "cwd" | "skill" | "prompt" | "title" | "emits"> & {
+    people?: { id: string; name: string }[];
+  };
   agent: {
     id: string;
     name: string;
@@ -44,7 +47,8 @@ export type Job = {
     }[];
     timers: { key: string; about: string; at: string }[];
     waiting: { key: string; about: string; at: string }[];
-    open: { card: number; title: string; text: string; at: string }[];
+    /** to: whom the card is for, when not the owner. */
+    open: { card: number; title: string; text: string; at: string; to?: { id: string; name: string } }[];
     decided: { card: number; title: string; choice: string | null; at: string }[];
   };
 };

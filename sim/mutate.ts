@@ -31,6 +31,23 @@ const edits: [string, string, string, string][] = [
     "if (rule) enqueue(draft, rule, eventId, card.lane,",
     "if (false) enqueue(draft, rule, eventId, card.lane,",
   ],
+  ["answer-recipient", "decide.ts", "if (address === undefined || given.by !== address)", "if (false)"],
+  ["answer-owner-for-person", "decide.ts", "} else if (card.to !== undefined) {", "} else if (false) {"],
+  ["answer-kept-as-person", "decide.ts", "const by = card.to ?? given.by ?? null;", "const by = given.by ?? null;"],
+  ["link-for-person", "http.ts", 'if (card.to !== undefined) throw new NotFound("没有这张卡片");', ""],
+  ["link-none-for-person", "decide.ts", "?.links === true && card.to === undefined;", "?.links === true;"],
+  ["deliver-people-channel", "decide.ts", "draft.rules.channels[channel]?.people !== true || !to", "!to"],
+  [
+    "deliver-person-address",
+    "decide.ts",
+    "draft.rules.channels[channel]?.people !== true || !to",
+    "draft.rules.channels[channel]?.people !== true",
+  ],
+  ["receipt-people", "decide.ts", "!peopleOf(draft.rules, rule).includes(card.to)", "false"],
+  ["card-key-recipient", "decide.ts", "card.to === undefined ? thread : `to:${card.to}:${thread}`", "thread"],
+  ["card-key-unambiguous", "decide.ts", "`to:${card.to}:${thread}`", "`${thread}:to:${card.to}`"],
+  ["quiet-only-owner", "decide.ts", 'rule?.tell === "never" && card.to === undefined', 'rule?.tell === "never"'],
+  ["failing-told-by-own-notice", "decide.ts", "!notice.fyi && notice.to === undefined", "!notice.fyi"],
   ["quiet-delivery", "decide.ts", "if (card.quiet ||", "if (false ||"],
   ["delivery-lease", "decide.ts", "not_before: iso(now + MINUTE)", "not_before: iso(now)"],
   ["delivery-version", "decide.ts", "version: Math.max(delivery.version, version)", "version: version"],
@@ -65,6 +82,7 @@ const tests = [
   "queue-costs",
   "http",
   "resume-thread",
+  "people",
 ].map((n) => `tests/${n}.test.ts`);
 export function mutate() {
   const root = join(import.meta.dirname, "..");
