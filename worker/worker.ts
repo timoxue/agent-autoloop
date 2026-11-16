@@ -403,7 +403,9 @@ export function createWorker({
       }
       return endWith(entry, { outcome: "failed", error: error.slice(0, 500), ...known, ...usage });
     }
-    const people = (entry.job.rule.people ?? []).map((person) => person.id);
+    // Whom it names is looked at here only so the Agent can write the receipt again. One with no session to do that in,
+    // a script, would lose the whole receipt for one name: the hub turns down that card alone.
+    const people = seen.session ? (entry.job.rule.people ?? []).map((person) => person.id) : null;
     const { result, problem } = resultFrom(readMessage(seen.text), { session, usage: entry.usage }, people);
     if (entry.repairs && !problem && result.outcome === "failed") return discardReceipt(entry, adapter, result.error!);
     if (!problem) return endWith(entry, result);

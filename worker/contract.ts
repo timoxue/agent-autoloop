@@ -193,12 +193,13 @@ function strangers(result: Result, people: string[]) {
 
 /**
  * The result to hand in, checked as the hub will. What stands without the receipt comes back with the problem. `people`
- * is whom the job's rule allows a card to be for; a job without the list allows no one.
+ * is whom the job's rule allows a card to be for; a job without the list allows no one. With null, whom it names isn't
+ * looked at here: the hub turns down each such card by itself and the rest of the receipt stands.
  */
 export function resultFrom(
   message: Message,
   extra: Pick<Result, "session" | "usage">,
-  people: string[] = [],
+  people: string[] | null = [],
 ): { result: Result; problem?: string } {
   const base: Result = {
     outcome: message.outcome,
@@ -210,7 +211,7 @@ export function resultFrom(
   if (message.problem) return { result: base, problem: message.problem };
   try {
     const result = parseResult({ ...base, ...message.receipt });
-    const problem = strangers(result, people);
+    const problem = people === null ? undefined : strangers(result, people);
     return problem ? { result: base, problem } : { result };
   } catch (error) {
     if (error instanceof InputError) return { result: base, problem: error.message };
