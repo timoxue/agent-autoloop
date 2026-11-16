@@ -6,7 +6,8 @@
 // brings back a card the owner closed at every tick.
 // Cancelling a timer that isn't waiting spoils the receipt it's in; a timer coming due after its rule has gone stops the
 // clock for everything else, starts something, or goes by without telling the owner; a clock set back runs the same
-// scheduled moment a second time.
+// scheduled moment a second time. A source's key named like the clock's own source records a moment before the clock
+// gets to it, and the clock, finding it on record, lets it pass without a run.
 import assert from "node:assert/strict";
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ const { execute, reloadRules, tick } = await import("./hub.ts");
 const { ingest } = await import("./hub.ts");
 const { claimNext, finish, started, heartbeat, cancel } = await import("./hub.ts");
 const { all, one, run } = await import("./storage.ts");
+const { AuthError } = await import("../kernel/errors.ts");
 
 const clean = () => {
   for (const table of ["run_events", "runs", "events", "seen", "cards", "deliveries", "timers", "schedules"])
@@ -63,6 +65,17 @@ test("a hub asleep through several owes only the latest", () => {
   assert.equal(ticks().length, 1);
   tick(at(40));
   assert.equal(ticks().length, 2);
+});
+
+test("the clock's source takes nothing through a source's door, so a moment sent ahead doesn't stop its run", () => {
+  clean();
+  tick(at(0));
+  const moment = "巡检@2026-10-18T02:05:00.000Z";
+  assert.throws(() => ingest("schedule", { id: moment, type: "schedule.tick" }, at(1)), AuthError);
+  assert.deepEqual(ticks(), []);
+  tick(at(5));
+  assert.deepEqual(ticks(), [moment]);
+  assert.equal(claim("w1", at(6))?.rule.name, "巡检");
 });
 
 test("a schedule that changes starts counting from the change", () => {

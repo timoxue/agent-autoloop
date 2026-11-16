@@ -1,7 +1,12 @@
 // Failure modes: a source revokes somebody else's key; a revoked key keeps a pending poll or stream alive; CLI writes
 // a different database instead of revoking through the running hub; a key named the way `key new` allows cannot be
-// revoked; removing a key that was never there is reported as if the key was revoked.
+// revoked; removing a key that was never there is reported as if the key was revoked; a key replaced from the command
+// line, which writes the database itself and wakes nobody in the running hub, goes on being served by a poll that was
+// already waiting on it.
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { after, test } from "node:test";
 import { setup } from "./helpers.ts";
 setup("key-remove");
@@ -50,4 +55,21 @@ test("only the owner removes keys and pending work is refused immediately", asyn
   const reader = response.body!.getReader();
   assert.equal((await request("/v1/keys/owner/me", owner, "DELETE")).status, 200);
   assert.equal((await reader.read()).done, true);
+});
+
+test("a key replaced from the command line is refused by the poll already waiting on it, at the latest when its wait ends", async () => {
+  const old = hub.addKey("worker", "w2");
+  const ends = new AbortController();
+  const headers = { authorization: `Bearer ${old}` };
+  const waiting = runtime.handle(
+    new Request("http://local/v1/work?claim=replaced&wait=50&capacity=0", { headers, signal: ends.signal }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  // Another process: it writes the new key to the database itself, and nothing tells the hub's waiting polls.
+  const cli = join(import.meta.dirname, "..", "bin", "agent-autoloop.ts");
+  const args = ["--disable-warning=ExperimentalWarning", cli, "key", "new", "worker", "w2"];
+  const { stdout } = await promisify(execFile)(process.execPath, args, { env: process.env });
+  ends.abort();
+  assert.equal((await waiting).status, 401);
+  assert.equal((await request("/v1/work?claim=fresh&wait=0&capacity=0", stdout.trim())).status, 200);
 });
