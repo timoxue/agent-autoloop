@@ -1,6 +1,6 @@
 // `rules explain` and `emit --dry-run`: what this machine's rules file says, without asking a hub or writing a fact.
 import { describeCron, nextRun, parseCron } from "../kernel/cron.ts";
-import { cronOf, eventRule, PEOPLE, peopleOf, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
+import { cronOf, eventRule, PEOPLE, peopleOf, SCHEDULE, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { parseEvent } from "../protocol/validate.ts";
 
@@ -30,8 +30,8 @@ function details(rule: Rule, rules: Rules, now: number) {
 }
 
 /**
- * What a rules file that passes leaves for its owner to do or to know, where people are concerned: nothing here is wrong,
- * but each is easy to leave half done.
+ * What a rules file that passes leaves for its owner to do or to know, where people are concerned and where a rule waits
+ * on the clock's own source: nothing here is wrong, but each is easy to leave half done.
  */
 export function peopleHints(rules: Rules): string[] {
   const hints: string[] = [];
@@ -57,6 +57,13 @@ export function peopleHints(rules: Rules): string[] {
     );
   }
   for (const rule of rules.rules) {
+    // The clock's events go only to the rule whose moment it is, and no source's key can send under that name.
+    if (eventRule(rule) && rule.when.source === SCHEDULE) {
+      hints.push(
+        `规则「${rule.name}」的 when.source 是 ${SCHEDULE}：这个来源名留给定时，来源的密钥往里发事件返回 401，` +
+          "这条规则只有手动 run、它自己的卡片被回答或复查到期时才会跑。要定时跑写 cron；要接事件，换成自己登记的来源",
+      );
+    }
     if (!eventRule(rule) || rule.when.source !== PEOPLE) continue;
     const senders = Object.keys(rules.people ?? {}).filter((id) =>
       (rule.when.from ?? ["*"]).some((from) => from === "*" || from === id),

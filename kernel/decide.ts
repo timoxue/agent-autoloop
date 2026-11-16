@@ -1,6 +1,7 @@
 // Everything that can change the hub is decided here: given the view and one input, the facts to record and the answer
 // to give. Time and secrets come in as arguments, so the same input on the same view always decides the same.
-import { credential, digest, whose, type Environment } from "./credentials.ts";
+import { timingSafeEqual } from "node:crypto";
+import { cardHash, credential, digest, whose, type Environment } from "./credentials.ts";
 import { latestBefore, nextRun, parseCron } from "./cron.ts";
 import { deadlines, MINUTE, offlineCard, OFFLINE_AFTER, RUN_LEASE, SEEN_EVERY, WORKER_FRESH } from "./due.ts";
 import { AuthError, Conflict, InputError, NotFound, notHolding } from "./errors.ts";
@@ -573,7 +574,9 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
 function holding(draft: Draft, { kind, name, key }: Holder) {
   if (kind === LINK) {
     const card = draft.view.get("cards", Number(name));
-    const opens = card && credential(draft.env, "card", card.id, card.created_at) === key;
+    // By their hashes, in the same time whatever the link given: how long it took says nothing of the real one.
+    const made = card && Buffer.from(cardHash(draft.env, card.id, card.created_at), "hex");
+    const opens = made && typeof key === "string" && timingSafeEqual(made, Buffer.from(digest(key), "hex"));
     return void linkedCard(draft.rules, opens ? card : undefined, draft.now);
   }
   if (typeof key !== "string" || whose(draft.view, kind, key) !== name) throw notHolding(kind);

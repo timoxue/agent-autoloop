@@ -110,8 +110,15 @@ const edits: [string, string, string, string][] = [
   [
     "link-known-at-commit",
     "decide.ts",
-    'const opens = card && credential(draft.env, "card", card.id, card.created_at) === key;',
-    "const opens = card;",
+    'const opens = made && typeof key === "string" && timingSafeEqual(made, Buffer.from(digest(key), "hex"));',
+    "const opens = made;",
+  ],
+  // The key along with what it asked for, in the fact: only looking through the log for keys finds it.
+  [
+    "key-not-in-fact",
+    "decide.ts",
+    "facts: draft.changes.length ? [factOf(draft, draft.changes)] : [], value };",
+    "facts: draft.changes.length ? [{ ...factOf(draft, draft.changes), holder } as Fact] : [], value };",
   ],
   ["schedule-source-door", "decide.ts", 'if (source === SCHEDULE) throw new AuthError("这个来源名留给定时");', ""],
   [
