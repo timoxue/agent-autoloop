@@ -23,7 +23,9 @@
 // session open just now, and one the agent refuses or can't go on in doesn't get a new one; a "没跑成" after a finished tool
 // call is run together with what came before it and counts as work done; a failed turn whose agent won't go, or leaves
 // something holding its output, or closes its output and stays, holds its place until the time limit and loses the real
-// reason. A receipt naming someone the job's rule doesn't allow is handed in for the hub to drop that card unheard.
+// reason. A receipt naming someone the job's rule doesn't allow is handed in for the hub to drop that card unheard,
+// when its Agent has a session to write it again in; or, from a script with no session, the whole receipt is thrown
+// away for the one name, with its look-agains and events, where the hub would have turned down only that card.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -537,6 +539,22 @@ test("a receipt naming someone the job's rule doesn't allow is asked for again, 
   await until(w, () => hub.results.length === 1);
   assert.match(readFileSync(join(folder, "stranger-asked.txt"), "utf8"), /bob/);
   assert.equal(hub.results[0].notice[0].to, "alice");
+});
+
+test("a script with no session to rewrite in hands in a receipt naming someone unlisted whole, for the hub to turn down that card", async () => {
+  const hub = fakeHub();
+  const receipt = {
+    notice: [{ title: "接一下", text: "登录页", to: "bob" }],
+    later: [{ key: "follow", at: "2026-11-05T09:00:00+08:00", about: "看接了没有" }],
+  };
+  const file = said("script-stranger", `派好了\n\n${FENCE}agent-autoloop\n${JSON.stringify(receipt)}\n${FENCE}\n`);
+  const given = job({ command: ["/bin/sh", "-c", `cat "${file}"`] });
+  hub.jobs.push({ ...given, rule: { ...given.rule, people: [{ id: "alice", name: "前端 A" }] } });
+  const w = worker(hub);
+  await until(w, () => hub.results.length === 1);
+  assert.equal(hub.results[0].outcome, "done");
+  assert.deepEqual(hub.results[0].notice, receipt.notice);
+  assert.deepEqual(hub.results[0].later, receipt.later);
 });
 
 test("a plugin with sessions and nothing to open gets to rewrite its receipt too", async () => {
