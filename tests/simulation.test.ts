@@ -4,7 +4,9 @@
 // a rule that doesn't take it from them, goes unnoticed; the simulation never has a member look, answer or speak, or the
 // rules never change under what's in flight (someone taken out, an Agent moved to another machine, a pause and a
 // replay), so what goes by the rules of an earlier moment is never met; a replay that hands over a message from someone
-// the rules no longer take it from goes unnoticed.
+// the rules no longer take it from goes unnoticed. No door's key is ever taken back or replaced in the simulation, and no
+// link stops opening its card, so a hub that decides what came in on a dead one is never met; such a hub, or one that
+// lets a source's door record what only the clock does, goes unnoticed.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { simulate } from "../sim/random.ts";
@@ -17,7 +19,18 @@ import { invariants } from "../sim/invariants.ts";
 test("200000 deterministic fault steps preserve safety and recovered work terminates", () => {
   const result = simulate(0x5eed, 200000);
   assert.equal(result.steps, 200000);
-  for (const fault of ["lost", "duplicate", "restart", "offline", "channel", "clock", "member", "rules"])
+  for (const fault of [
+    "lost",
+    "duplicate",
+    "restart",
+    "offline",
+    "channel",
+    "clock",
+    "member",
+    "rules",
+    "keys",
+    "link",
+  ])
     assert.ok(result.faults[fault] > 0, fault);
   assert.ok(result.completed > 0);
   console.log(JSON.stringify(result));
@@ -109,6 +122,34 @@ test("message checks reject a replay that hands a rule a message its sender is n
   const replayed = log.pop()!;
   log.push({ ...gone, seq: replayed.seq }, { ...replayed, seq: replayed.seq + 1 });
   assert.throws(() => invariants(evolve(new World().view, log.slice(1)), log), /补跑/);
+});
+
+test("key checks reject a hub that decides what came in on a key the simulation knows was replaced", () => {
+  const w = new World();
+  const first = w.issue("source", "app");
+  w.call("ingest", "app", { id: "a", type: "one" });
+  // As a hub that didn't look again would leave it: the simulation's record has moved on to a new key, the hub's hasn't.
+  w.held["source:app"] = "the-one-issued-since";
+  const late = () => w.callAs({ kind: "source", name: "app", key: first }, "ingest", "app", { id: "b", type: "one" });
+  assert.throws(late, /作废/);
+});
+
+test("link checks reject a hub that answers by a link after the rules stopped taking links", () => {
+  const w = new World();
+  w.call("createCard", { key: "q", kind: "ask", title: "选", options: ["甲", "乙"] });
+  const card = w.view.get("cards", 1)!;
+  const holder = { kind: "link", name: "1", key: w.link(card as any) };
+  // The simulation's reading of the file says links are off; the hub still has them on.
+  w.shape = { ...w.shape, links: false };
+  assert.throws(() => w.callAs(holder, "answer", 1, { choice: 0, by: "链接" }), /链接/);
+});
+
+test("source checks reject a moment of the clock's that came in through a source's door", () => {
+  const w = new World();
+  w.call("ingest", "app", { id: "m", type: "one" });
+  const log = structuredClone(w.log);
+  for (const f of log) for (const c of f.changes) if (c.table === "events" && c.row) c.row.source = "schedule";
+  assert.throws(() => invariants(evolve(new World().view, log.slice(1)), log), /定时/);
 });
 
 test("the simulation catches omitted deadlines that strand deferred work", () => {

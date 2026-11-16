@@ -1,6 +1,7 @@
 // `check` reads a rules file and nothing else. Failure cases: checking a draft opens the hub's database, creates a master
 // key, or loads the draft into the running hub as its rules; only the installed rules file can be checked; a bad file
-// passes, or a missing one crashes instead of saying so.
+// passes, or a missing one crashes instead of saying so. A rule waiting on the clock's own source, which no source's key
+// can send to, passes without a word, and its owner waits for events that never come.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -71,4 +72,21 @@ test("without a file it checks the installed rules; a bad or missing file fails 
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /规则「意见」有不认识的字段 colour/);
   assert.ok(!existsSync(join(installed, "hub.db")));
+});
+
+test("a rule on the clock's source passes, with a hint that no source can send it anything", () => {
+  const rules = JSON.parse(fixture);
+  rules.rules.push({
+    name: "等定时",
+    when: { source: "schedule", types: ["x.y"] },
+    to: "a1",
+    cwd: "~/x",
+    prompt: "做。",
+  });
+  const file = join(home, "on-schedule.json");
+  writeFileSync(file, JSON.stringify(rules));
+  const done = cli({ AGENT_AUTOLOOP_HOME: join(home, "hint-home") }, "check", file);
+  assert.equal(done.status, 0, done.stderr);
+  assert.match(done.stdout, /提示：规则「等定时」.*schedule.*不能再靠来源密钥接收新事件.*cron/);
+  assert.doesNotMatch(cli({ AGENT_AUTOLOOP_HOME: join(home, "hint-home") }, "check", draft).stdout, /提示/);
 });

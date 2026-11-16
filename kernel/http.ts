@@ -1,9 +1,10 @@
 // The doors: every request the hub takes, which key it asks for, and which input it becomes. Nothing is decided here.
 import { cardPage, PAGE_HEADERS, wordsPage } from "./card-page.ts";
 import { whose, type Environment } from "./credentials.ts";
-import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
+import type { Holder } from "./decide.ts";
+import { AuthError, Conflict, InputError, NotFound, notHolding } from "./errors.ts";
 import { iso, type Row, type View } from "./evolve.ts";
-import { agentsOf, cancels, cardView, configuration, eventOutcome, mineOf } from "./query.ts";
+import { agentsOf, cancels, cardView, configuration, eventOutcome, LINK, linkedCard, mineOf } from "./query.ts";
 import { eventRule, ruleOf } from "./rules.ts";
 import { isAsk } from "../protocol/validate.ts";
 
@@ -12,7 +13,8 @@ export type Services = {
   view(): View;
   environment: Environment;
   commit: string;
-  dispatch(type: string, args: any[], now: number): any;
+  /** Decides one input and writes what comes of it. With a holder, only if they still hold what the door saw then. */
+  dispatch(type: string, args: any[], now: number, holder?: Holder): any;
   state(now: number, before?: number): unknown;
   /** What a pause has kept from a rule since it began and nothing has made up yet, newest first: how many, and the
    * latest of them, or all of them. */
@@ -26,10 +28,8 @@ export type Services = {
 
 const MAX_BODY = 1024 * 1024;
 const MAX_WAIT_SECONDS = 50;
-const LINK_LIFETIME = 7 * 86400_000;
 const CARD_LINK = /^\/c\/([A-Za-z0-9_-]{1,64})$/;
 const POSITIVE_ID = /^[1-9][0-9]*$/;
-const KEY_HOLDERS: Record<string, string> = { owner: "本人", worker: "接单程序", channel: "通道", source: "来源" };
 const NO_STORE = { "cache-control": "no-store" };
 
 class TooLarge extends Error {}
@@ -76,16 +76,28 @@ function callFrom(services: Services, request: Request) {
   const token = request.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
   const now = services.now();
   const view = services.view();
-  return { services, request, url, token, now, view, rules: configuration(view) };
+  // What the door let this request in on, once it has: it goes along with everything the request then asks for.
+  const holder = undefined as Holder | undefined;
+  return { services, request, url, token, now, view, rules: configuration(view), holder };
 }
 type Call = ReturnType<typeof callFrom>;
 
 const keyHolder = (call: Call, kind: string) => whose(call.view, kind, call.token);
-const act = (call: Call, type: string, ...args: any[]) => call.services.dispatch(type, args, call.services.now());
+/** Hands an input over to be decided. The door looked before the request's body came, so what it let the request in on
+ * goes along, to be asked again where the decision is written. A member's key goes in the input itself. */
+const act = (call: Call, type: string, ...args: any[]) =>
+  call.services.dispatch(type, args, call.services.now(), call.holder);
+
+/** Lets the request in on a key of this kind, if it came with one, and says whose. */
+function enter(call: Call, kind: string) {
+  const name = keyHolder(call, kind);
+  if (name) call.holder = { kind, name, key: call.token };
+  return name;
+}
 
 function requireKey(call: Call, kind: string) {
-  const holder = keyHolder(call, kind);
-  if (!holder) throw new AuthError(`要${KEY_HOLDERS[kind]}自己的密钥`);
+  const holder = enter(call, kind);
+  if (!holder) throw notHolding(kind);
   return holder;
 }
 
@@ -95,7 +107,7 @@ const memberOf = (call: Call) => keyHolder(call, "person");
 
 function requireMember(call: Call) {
   const person = memberOf(call);
-  if (!person) throw new AuthError("要成员自己的密钥");
+  if (!person) throw notHolding("person");
   return person;
 }
 
@@ -114,15 +126,10 @@ function waitUntil(call: Call) {
 async function cardAtLink(call: Call, linkToken: string) {
   const { rules, request } = call;
   const { environment } = call.services;
-  const card = call.services.card(linkToken);
-  const linksInUse = Object.values(rules.channels).some((channel) => channel.links);
-  if (!card || !linksInUse) throw new NotFound("没有这张卡片");
-  // A card for someone is theirs to answer where they are; it was never given a link, and one worked out won't open.
-  if (card.to !== undefined) throw new NotFound("没有这张卡片");
-  if (call.now - Date.parse(card.created_at) > LINK_LIFETIME) {
-    throw new AuthError("这个链接过期了。在装它的电脑上运行 agent-autoloop status，还没答的卡片都在那里，可以接着回答");
-  }
+  const card = linkedCard(rules, call.services.card(linkToken), call.now);
   if (request.method === "GET") return new Response(cardPage(cardView(card, environment)), { headers: PAGE_HEADERS });
+  // Whether the link still opens the card is asked again once the form is here, where the answer is written.
+  call.holder = { kind: LINK, name: String(card.id), key: linkToken };
   const form = new URLSearchParams(await readText(request));
   const choice = form.has("choice") && { choice: Number(form.get("choice")) };
   act(call, "answer", card.id, { ...choice, text: form.get("text") ?? undefined, by: "链接" });
@@ -137,8 +144,8 @@ async function webhook(call: Call, source: string) {
 
 async function tell(call: Call) {
   const { rules } = call;
-  const source = keyHolder(call, "source");
-  const worker = source ? null : keyHolder(call, "worker");
+  const source = enter(call, "source");
+  const worker = source ? null : enter(call, "worker");
   if (!source && !worker) throw new AuthError("要来源或接单程序的密钥");
   const input = await readJson(call.request);
   // A task elsewhere either tells you something or asks you, with a question just as a receipt's.

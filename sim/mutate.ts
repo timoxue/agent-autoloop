@@ -34,7 +34,7 @@ const edits: [string, string, string, string][] = [
   ["answer-recipient", "decide.ts", "if (address === undefined || given.by !== address)", "if (false)"],
   ["answer-owner-for-person", "decide.ts", "} else if (card.to !== undefined) {", "} else if (false) {"],
   ["answer-kept-as-person", "decide.ts", "const by = card.to ?? given.by ?? null;", "const by = given.by ?? null;"],
-  ["link-for-person", "http.ts", 'if (card.to !== undefined) throw new NotFound("没有这张卡片");', ""],
+  ["link-for-person", "query.ts", 'if (card.to !== undefined) throw new NotFound("没有这张卡片");', ""],
   ["link-none-for-person", "decide.ts", "?.links === true && card.to === undefined;", "?.links === true;"],
   ["deliver-people-channel", "decide.ts", "draft.rules.channels[channel]?.people !== true || !to", "!to"],
   [
@@ -52,8 +52,8 @@ const edits: [string, string, string, string][] = [
   [
     "member-key-own-doors",
     "http.ts",
-    "const holder = keyHolder(call, kind);",
-    'const holder = keyHolder(call, kind) ?? keyHolder(call, "person");',
+    "const holder = enter(call, kind);",
+    'const holder = enter(call, kind) ?? enter(call, "person");',
   ],
   ["person-key-registered", "decide.ts", 'if (kind === "person" && !personOf(draft.rules, name)) {', "if (false) {"],
   ["me-only-mine", "query.ts", "const mine = { to: person };", "const mine = {};"],
@@ -88,10 +88,52 @@ const edits: [string, string, string, string][] = [
     'if (personWorkers(draft.rules, given.person).includes(workerOf(draft.view, draft.view.get("runs", card.run_id)!))) {',
   ],
   [
-    "member-key-at-commit",
+    "key-at-commit",
     "decide.ts",
-    'if (typeof key !== "string" || whose(draft.view, "person", key) !== person) throw new AuthError("要成员自己的密钥");',
+    'if (typeof key !== "string" || whose(draft.view, kind, key) !== name) throw notHolding(kind);',
     "",
+  ],
+  ["door-key-at-commit", "decide.ts", "if (holder) holding(draft, holder);", ""],
+  [
+    "member-answer-key-at-commit",
+    "decide.ts",
+    'if (given.person !== undefined) holding(draft, { kind: "person", name: given.person, key: given.key });',
+    "",
+  ],
+  ["member-say-key-at-commit", "decide.ts", 'holding(draft, { kind: "person", name: person, key });', ""],
+  [
+    "link-at-commit",
+    "decide.ts",
+    "return void linkedCard(draft.rules, opens ? card : undefined, draft.now);",
+    "return;",
+  ],
+  [
+    "link-known-at-commit",
+    "decide.ts",
+    'const opens = made && typeof key === "string" && timingSafeEqual(made, Buffer.from(digest(key), "hex"));',
+    "const opens = made;",
+  ],
+  // The key along with what it asked for, in the fact: only looking through the log for keys finds it.
+  [
+    "key-not-in-fact",
+    "decide.ts",
+    "facts: draft.changes.length ? [factOf(draft, draft.changes)] : [], value };",
+    "facts: draft.changes.length ? [{ ...factOf(draft, draft.changes), holder } as Fact] : [], value };",
+  ],
+  ["schedule-source-door", "decide.ts", 'if (source === SCHEDULE) throw new AuthError("这个来源名留给定时");', ""],
+  [
+    "door-key-goes-along",
+    "http.ts",
+    "call.services.dispatch(type, args, call.services.now(), call.holder);",
+    "call.services.dispatch(type, args, call.services.now());",
+  ],
+  ["key-let-in-goes-along", "http.ts", "if (name) call.holder = { kind, name, key: call.token };", ""],
+  ["link-goes-along", "http.ts", "call.holder = { kind: LINK, name: String(card.id), key: linkToken };", ""],
+  [
+    "key-name-not-key-kept",
+    "http.ts",
+    ": act(call, type, name, holder, given);",
+    ": act(call, type, name, call.token, given);",
   ],
   [
     "removed-person-key-revoked",
@@ -122,8 +164,8 @@ const edits: [string, string, string, string][] = [
   ["due-at-tick", "decide.ts", 'if (!draft.changes.length && type !== "tick")', "if (!draft.changes.length)"],
   ["offline-hides-new-work", "due.ts", "waiting.every((run) => run.created_at <= card.closed_at)", "true"],
   ["offline-closed-comes-back", "due.ts", "waiting.every((run) => run.created_at <= card.closed_at)", "false"],
-  ["link-expiry", "http.ts", "call.now - Date.parse(card.created_at) > LINK_LIFETIME", "false"],
-  ["links-in-use", "http.ts", "if (!card || !linksInUse)", "if (!card)"],
+  ["link-expiry", "query.ts", "now - Date.parse(card.created_at) > LINK_LIFETIME", "false"],
+  ["links-in-use", "query.ts", "if (!card || !linksInUse)", "if (!card)"],
   ["projection-drop", "evolve.ts", "if (row === null)", 'if (row === null || table === "cards")'],
   ["log-order", "store.ts", "ORDER BY seq", "ORDER BY seq DESC"],
   ["stale-commit", "store.ts", "if (latest !== view.seq)", "if (false)"],
@@ -143,6 +185,7 @@ const tests = [
   "resume-thread",
   "people",
   "member",
+  "commit-auth",
 ].map((n) => `tests/${n}.test.ts`);
 export function mutate() {
   const root = join(import.meta.dirname, "..");

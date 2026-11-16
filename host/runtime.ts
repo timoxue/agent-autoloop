@@ -8,7 +8,7 @@ import { HOME, RULES_FILE } from "./home.ts";
 import { privateDirectory } from "./files.ts";
 import { skippedOf, stateOf as state, viewStatements } from "./state.ts";
 import { cardHash, digest, whose as keyHolder } from "../kernel/credentials.ts";
-import { decide } from "../kernel/decide.ts";
+import { decide, type Holder } from "../kernel/decide.ts";
 import { NotFound } from "../kernel/errors.ts";
 import { initialize, rows, statement, type Fact, type Row, type Table } from "../kernel/evolve.ts";
 import * as query from "../kernel/query.ts";
@@ -82,11 +82,13 @@ export const onChange = (listener: Listener) => {
   return () => listeners.delete(listener);
 };
 
-export function execute(type: string, args: any[], now = Date.now()) {
+/** Decides one input on the latest view and writes what comes of it, in one transaction. A request that came in on a key
+ * names its `holder`, who is asked again there: the door looked earlier, and a key can be taken back in between. */
+export function execute(type: string, args: any[], now = Date.now(), holder?: Holder) {
   let facts: Fact[] = [];
   let value: any;
   current = commitLatest(db, format, (latest) => {
-    ({ facts, value } = decide(latest, { type, args }, now, environment));
+    ({ facts, value } = decide(latest, { type, args, holder }, now, environment));
     return facts;
   });
   if (facts.length) for (const listener of listeners) listener(type, facts);

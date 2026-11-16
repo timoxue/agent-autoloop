@@ -3,13 +3,18 @@ import { decide, type Input } from "../kernel/decide.ts";
 import { empty, evolve, rows, snapshot, type Fact } from "../kernel/evolve.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { credential, digest } from "../kernel/credentials.ts";
-import { invariants } from "./invariants.ts";
+import { admitted, invariants } from "./invariants.ts";
 
 export const environment = { secret: "test-simulation", publicUrl: "https://hub.test" };
-/** How the rules file stands: whether p2 is registered, and which machine Agent a runs on. The rest never changes. */
-export type Shape = { p2: boolean; aOn: "w1" | "w3" };
-const BASE: Shape = { p2: true, aOn: "w1" };
-const written = ({ p2, aOn }: Shape) =>
+/** How the rules file stands: whether p2 is registered, which machine Agent a runs on, and whether the owner's channel
+ * takes links. The rest never changes. */
+export type Shape = { p2: boolean; aOn: "w1" | "w3"; links: boolean };
+const BASE: Shape = { p2: true, aOn: "w1", links: true };
+/** How long a card's link opens it, by the protocol's word. */
+const WEEK = 7 * 86400000;
+/** What only the owner's key asks for. */
+const OWNERS = ["pauseRule", "resumeRule", "replayRule", "runRule", "cancel", "resolve", "removeKey"];
+const written = ({ p2, aOn, links }: Shape) =>
   JSON.stringify({
     timezone: "UTC",
     sources: { app: { name: "来源" } },
@@ -17,7 +22,10 @@ const written = ({ p2, aOn }: Shape) =>
       a: { name: "甲", worker: aOn, use: "command", command: ["true"] },
       b: { name: "乙", worker: "w2", use: "command", command: ["true"] },
     },
-    channels: { chat: { name: "通道", answerers: ["owner"] }, team: { name: "团队", people: true } },
+    channels: {
+      chat: { name: "通道", answerers: ["owner"], ...(links && { links: true }) },
+      team: { name: "团队", people: true },
+    },
     // p1 is reached on a channel and w1 is their own machine; p2 by their key alone.
     people: {
       p1: { name: "成员", at: { team: "u1" }, workers: ["w1"] },
@@ -75,6 +83,10 @@ export class World {
   keys: Record<string, string | undefined> = {};
   /** The key someone had when they were taken out: it must not work again, then or once they're back. */
   old: Record<string, string> = { p1: "never-a-key", p2: "never-a-key" };
+  /** The key each door goes by, under `kind:name`, as the simulation issued it: the one that works now, and one that
+   * did before it was taken back or replaced. An owner, a source, a worker or a channel gets one when it first acts. */
+  held: Record<string, string | undefined> = {};
+  dead: Record<string, string> = {};
   issued = 0;
   takenBy = new Map<number, string>();
   madeOn = new Map<number, string | undefined>();
@@ -86,6 +98,45 @@ export class World {
   key(person: string) {
     this.keys[person] = `key-${person}-${++this.issued}`;
     this.call("key", "person", person, digest(this.keys[person]!));
+  }
+  /** A new key for this door: the one it had, if any, is dead from here on. */
+  issue(kind: string, name: string) {
+    const id = `${kind}:${name}`;
+    if (this.held[id]) this.dead[id] = this.held[id]!;
+    this.held[id] = `key-${id}-${++this.issued}`;
+    this.act({ type: "key", args: [kind, name, digest(this.held[id]!)] });
+    return this.held[id]!;
+  }
+  /** The owner takes a door's key back, with the owner's own key while it still works. */
+  revoke(kind: string, name: string) {
+    const id = `${kind}:${name}`;
+    this.call("removeKey", kind, name);
+    this.dead[id] = this.held[id]!;
+    this.held[id] = undefined;
+  }
+  /** What a card's link is made from. */
+  link(card: { id: number; created_at: string }) {
+    return credential(environment, "card", card.id, card.created_at);
+  }
+  /** Whose door an input comes through, when it's a key's: a member's key goes in the input itself. */
+  door(type: string, args: any[]): [string, string] | undefined {
+    if (type === "ingest") return ["source", args[0]];
+    if (type === "heartbeat" || type === "claimNext") return ["worker", args[0]];
+    if (["nextCard", "channelSeen", "delivered", "failed"].includes(type)) return ["channel", args[0]];
+    if (type === "answer" && args[1]?.channel !== undefined) return ["channel", args[1].channel];
+    if (type === "answer" && args[1]?.person === undefined) return ["owner", "owner"];
+    if (OWNERS.includes(type)) return ["owner", "owner"];
+  }
+  /** Whether what an input came in on is good at this moment, by the simulation's own record and nothing of the hub's:
+   * the key issued last and not taken back, or a link to a card of the owner's while links are taken and its week lasts. */
+  good({ type, args, holder }: Input) {
+    if (type === "say" && this.keys[args[0]] !== args[1]) return false;
+    if (type === "answer" && args[1]?.person !== undefined && this.keys[args[1].person] !== args[1].key) return false;
+    if (!holder) return true;
+    if (holder.kind !== "link") return this.held[`${holder.kind}:${holder.name}`] === holder.key;
+    const card = this.view.get("cards", Number(holder.name));
+    const lasts = card && this.now - Date.parse(card.created_at) <= WEEK;
+    return !!lasts && this.shape.links && card.to === undefined && holder.key === this.link(card as any);
   }
   /** The owner rewrites rules.json. Someone taken out loses their key; put back, they're given a new one. */
   change(shape: Shape) {
@@ -117,15 +168,27 @@ export class World {
   }
   act(input: Input) {
     const before = this.checked;
+    const good = this.good(input);
     const d = decide(this.view, input, this.now, environment);
+    admitted(good);
     this.log.push(...d.facts);
     this.view = evolve(this.view, d.facts);
     this.transitions++;
     this.checked = invariants(this.view, this.log, before);
     return d.value;
   }
+  /** An input through its door, with the key that door goes by now. What the hub does of itself has none. */
   call(type: string, ...args: any[]) {
-    return this.act({ type, args });
+    const door = this.door(type, args);
+    // The clock's source is nobody's to hold a key for.
+    if (!door || door.join(":") === "source:schedule") return this.act({ type, args });
+    const [kind, name] = door;
+    const key = this.held[door.join(":")] ?? this.issue(kind, name);
+    return this.act({ type, args, holder: { kind, name, key } });
+  }
+  /** An input that came in on this key or link, good or not. */
+  callAs(holder: { kind: string; name: string; key: string }, type: string, ...args: any[]) {
+    return this.act({ type, args, holder });
   }
   restart() {
     this.view.close();
