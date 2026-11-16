@@ -3,7 +3,7 @@
 import { credential, digest, whose, type Environment } from "./credentials.ts";
 import { latestBefore, nextRun, parseCron } from "./cron.ts";
 import { deadlines, MINUTE, offlineCard, OFFLINE_AFTER, RUN_LEASE, SEEN_EVERY, WORKER_FRESH } from "./due.ts";
-import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
+import { AuthError, Conflict, InputError, NotFound, notHolding } from "./errors.ts";
 import { iso, rows, type Change, type Fact, type Row, type Table, type View } from "./evolve.ts";
 import {
   agentsOf,
@@ -11,6 +11,8 @@ import {
   configuration,
   eventsOf,
   jobOf,
+  LINK,
+  linkedCard,
   openInScope,
   pauseOf,
   recipientOf,
@@ -48,7 +50,10 @@ import {
   type Result,
 } from "../protocol/validate.ts";
 
-export type Input = { type: string; args: any[] };
+/** What a door let a request in on: whose key of which kind, or a card's link (the card's id is its name). */
+export type Holder = { kind: string; name: string; key: string };
+/** With a holder, the input is decided only if they still hold what the door saw. */
+export type Input = { type: string; args: any[]; holder?: Holder };
 
 /** Minutes after the first try that a card is sent to a channel again. */
 const RESEND_AT = [0, 1, 3, 7, 15, 25, 35, 45, 55];
@@ -85,10 +90,11 @@ type Given = { type: string; seq: number; now: number; at: string; env: Environm
 type Draft = Given & { view: View; changes: Change[] };
 
 export function decide(view: View, input: Input, now: number, env: Environment): { facts: Fact[]; value: any } {
-  const { type, args } = input;
+  const { type, args, holder } = input;
   if (!Object.hasOwn(HANDLERS, type)) throw new InputError(`不认识的输入：${type}`);
   const rules = configuration(view);
   const draft: Draft = { view: view.fork(), seq: view.seq + 1, type, now, at: iso(now), env, rules, changes: [] };
+  if (holder) holding(draft, holder);
   const value = HANDLERS[type](draft, ...args);
   // With nothing changed nothing new can come due, and what only the clock changes has a deadline of its own to bring a tick.
   if (!draft.changes.length && type !== "tick") return { facts: [], value };
@@ -560,14 +566,21 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   return { rejected };
 }
 
-/** Whose key this is, as things stand where the decision is made: the door looked before the request's body came, and
- * the person may have been taken out, or the key taken back or replaced, since. */
-function memberHolding(draft: Draft, person: string, key: unknown) {
-  if (typeof key !== "string" || whose(draft.view, "person", key) !== person) throw new AuthError("要成员自己的密钥");
+/** Whether what a door let a request in on still holds, as things stand where the decision is made and in the same
+ * transaction as what it writes: the door looked before the request's body came, and the key may have been taken back
+ * or replaced since, the person taken out, the channels stopped taking links. Every kind of key and a card's link come
+ * through here. The key is only compared: nothing here or after puts it in a fact. */
+function holding(draft: Draft, { kind, name, key }: Holder) {
+  if (kind === LINK) {
+    const card = draft.view.get("cards", Number(name));
+    const opens = card && credential(draft.env, "card", card.id, card.created_at) === key;
+    return void linkedCard(draft.rules, opens ? card : undefined, draft.now);
+  }
+  if (typeof key !== "string" || whose(draft.view, kind, key) !== name) throw notHolding(kind);
 }
 
 function answer(draft: Draft, id: number, given: Row) {
-  if (given.person !== undefined) memberHolding(draft, given.person, given.key);
+  if (given.person !== undefined) holding(draft, { kind: "person", name: given.person, key: given.key });
   const card = draft.view.get("cards", id);
   if (!card) throw new NotFound("没有这张卡片");
   if (given.channel !== undefined) {
@@ -835,11 +848,13 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
   ingest(draft, source, given) {
     // What members send comes only with their own keys: a source's key by that name would post among their messages.
     if (source === PEOPLE && draft.rules.people !== undefined) throw new AuthError("这个来源名留给成员发的消息");
+    // What the clock makes happen is the hub's to record: a moment sent ahead under its source would pass without a run.
+    if (source === SCHEDULE) throw new AuthError("这个来源名留给定时");
     return ingest(draft, source, given, true);
   },
   /** A member's message, an event like any other. Not theirs to read back as a source reads its own. */
   say(draft, person, key, given) {
-    memberHolding(draft, person, key);
+    holding(draft, { kind: "person", name: person, key });
     return ingest(draft, PEOPLE, given, false, person);
   },
   createCard,

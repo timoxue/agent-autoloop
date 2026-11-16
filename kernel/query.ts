@@ -1,5 +1,6 @@
 // Reading the view: what the decisions and the doors ask of it, and the shapes they hand out.
 import { credential, type Environment } from "./credentials.ts";
+import { AuthError, NotFound } from "./errors.ts";
 import { rows, type Fact, type Row, type View } from "./evolve.ts";
 import { addressOf, peopleOf, personOf, personWorkers, ruleOf, type Rule, type Rules } from "./rules.ts";
 import type { Job } from "../protocol/job.ts";
@@ -101,6 +102,23 @@ export function recipientOf(rules: Rules, card: Row, channel: string) {
   const address = card.to === undefined ? undefined : addressOf(rules, card.to, channel);
   if (address === undefined) return undefined;
   return { id: card.to as string, name: rules.people![card.to].name, address };
+}
+
+/** What a card's link is held as where its answer is decided: not a key, so it's found by the card. */
+export const LINK = "link";
+const LINK_LIFETIME = 7 * 86400_000;
+
+/** The card a link opens, as things stand at this moment, or why it opens none. Asked at the door and again where the
+ * answer is written: the channels may have stopped taking links, or its week run out, while the form was coming. */
+export function linkedCard(rules: Rules, card: Row | undefined, now: number) {
+  const linksInUse = Object.values(rules.channels).some((channel) => channel.links);
+  if (!card || !linksInUse) throw new NotFound("没有这张卡片");
+  // A card for someone is theirs to answer where they are; it was never given a link, and one worked out won't open.
+  if (card.to !== undefined) throw new NotFound("没有这张卡片");
+  if (now - Date.parse(card.created_at) > LINK_LIFETIME) {
+    throw new AuthError("这个链接过期了。在装它的电脑上运行 agent-autoloop status，还没答的卡片都在那里，可以接着回答");
+  }
+  return card;
 }
 
 /** How many settled cards a member is shown. */
