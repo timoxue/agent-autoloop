@@ -35,7 +35,15 @@ function details(rule: Rule, rules: Rules, now: number) {
  */
 export function peopleHints(rules: Rules): string[] {
   const hints: string[] = [];
+  const machines = new Set(Object.values(rules.agents).map((agent) => agent.worker));
   for (const [id, person] of Object.entries(rules.people ?? {})) {
+    // A name no Agent runs on guards nothing: most likely a slip, and the guard it was meant to be is silently off.
+    for (const worker of (person.workers ?? []).filter((worker) => !machines.has(worker))) {
+      hints.push(
+        `${id}（${person.name}）的 workers 里的 ${worker} 不是任何 Agent 的接单电脑：写错了的话，` +
+          "“他名下的电脑那一轮发给他的卡片不能用成员密钥回答”这一条对那台电脑不起作用",
+      );
+    }
     if (Object.keys(person.at ?? {}).length) continue;
     if (person.workers?.length) {
       hints.push(

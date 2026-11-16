@@ -1,6 +1,6 @@
 // `agent-autoloop mcp`: the hub's doors as MCP tools over stdio, using the keys already in this machine's config.json.
 // A machine with a member's key and not the owner's is a member's: it gets the member's tools and none of the owner's.
-import { answererFor, messageEvent } from "./me.ts";
+import { answerCard, messageEvent } from "./me.ts";
 import { readConfig } from "../host/config.ts";
 import { eachLine } from "../host/lines.ts";
 import { versionName } from "../host/version.ts";
@@ -97,7 +97,7 @@ function validArguments(tool: Tool, args: any) {
   return tool.name !== "answer" || (args.choice !== undefined) !== (args.text !== undefined);
 }
 
-function callTool(hub: Hub, name: Tool["name"], args: any) {
+function callTool(hub: Hub, name: Tool["name"], args: any, config: ReturnType<typeof readConfig>) {
   switch (name) {
     case "me":
       return hub.me();
@@ -108,8 +108,9 @@ function callTool(hub: Hub, name: Tool["name"], args: any) {
     case "why":
       return hub.why(args.run);
     case "answer": {
+      // With the owner's key and a member's both here, a card is answered with whichever may answer it.
       const { card, ...answer } = args;
-      return hub.answer(card, answer);
+      return answerCard(config, card, answer);
     }
     case "resolve":
       return hub.resolve(args.card, args.reason);
@@ -147,12 +148,8 @@ export async function mcp() {
     const args = params?.arguments ?? {};
     if (!tool || !validArguments(tool, args)) return refuse(id, -32602, "工具名或参数不正确");
     try {
-      // With the owner's key and a member's both here, a card is answered with whichever may answer it.
-      const hub =
-        tool.name === "answer"
-          ? (await answererFor(config, args.card))!
-          : hubClient(config.url, usesSourceKey(tool.name) ? config.source!.key : (config.owner ?? config.person!.key));
-      const result = await callTool(hub, tool.name, args);
+      const key = usesSourceKey(tool.name) ? config.source!.key : (config.owner ?? config.person!.key);
+      const result = await callTool(hubClient(config.url, key), tool.name, args, config);
       reply(id, { result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
     } catch (error) {
       reply(id, { result: { isError: true, content: [{ type: "text", text: (error as Error).message }] } });

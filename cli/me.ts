@@ -2,7 +2,7 @@
 // line and MCP both use these, so the two say and send the same.
 import { randomUUID } from "node:crypto";
 import type { Config } from "../host/config.ts";
-import { hubClient } from "../protocol/client.ts";
+import { HubError, hubClient } from "../protocol/client.ts";
 import { clockFor } from "./status.ts";
 
 type Card = {
@@ -61,15 +61,24 @@ export function messageEvent(type: string, words: string, { subject, id }: { sub
   return { id: id ?? randomUUID(), type, ...(subject && { subject }), summary, detail: words };
 }
 
+type Answer = { choice?: number; text?: string };
+
 /**
- * The key that may answer a card from this machine. A member's key answers only what's for them and the owner's only
- * what isn't, so with both here the member's list says which it is.
+ * Answers a card with the key on this machine that may. With only one of the two that's the one. With both, the owner's
+ * goes first, so nothing about the member's key (taken back, or its person gone) can keep the owner from their own
+ * cards; a card the owner's is refused is someone's, and the member's key says whether it's theirs, open or not. When
+ * it isn't, what the owner's key was told is the reason to show: to the member's, such a card isn't there at all.
  */
-export async function answererFor(config: Config, card: number) {
+export async function answerCard(config: Config, card: number, body: Answer) {
   const member = config.person && hubClient(config.url, config.person.key);
-  if (!config.owner) return member;
-  const owner = hubClient(config.url, config.owner);
-  if (!member) return owner;
-  const mine: Mine = await member.me();
-  return mine.cards.some((open) => open.id === card) ? member : owner;
+  const owner = config.owner ? hubClient(config.url, config.owner) : undefined;
+  if (!owner || !member) return (owner ?? member)?.answer(card, body);
+  try {
+    return await owner.answer(card, body);
+  } catch (refused) {
+    if (!(refused instanceof HubError) || refused.status !== 401) throw refused;
+    return await member.answer(card, body).catch((error) => {
+      throw error instanceof HubError && error.status === 404 ? refused : error;
+    });
+  }
 }

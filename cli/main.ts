@@ -564,8 +564,10 @@ async function answer(args: string[]) {
   const card = Number(rest[0]);
   if (!Number.isInteger(card) || card < 1) return fail(TAKES.answer.usage);
   const words = text(named.text);
-  const { answererFor } = await import("./me.ts");
-  const done = await ((await answererFor(readConfig(), card)) ?? ownerClient()).answer(card, {
+  const { answerCard } = await import("./me.ts");
+  const config = readConfig();
+  if (!config.owner && !config.person) ownerClient(config);
+  const done = await answerCard(config, card, {
     ...(rest[1] !== undefined && { choice: Number(rest[1]) - 1 }),
     ...(words && { text: words }),
   });
