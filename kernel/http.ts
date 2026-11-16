@@ -4,7 +4,7 @@ import { whose, type Environment } from "./credentials.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import { iso, type Row, type View } from "./evolve.ts";
 import { agentsOf, cancels, cardView, configuration, eventOutcome, mineOf } from "./query.ts";
-import { eventRule, personOf, ruleOf } from "./rules.ts";
+import { eventRule, ruleOf } from "./rules.ts";
 import { isAsk } from "../protocol/validate.ts";
 
 export type Services = {
@@ -89,11 +89,9 @@ function requireKey(call: Call, kind: string) {
   return holder;
 }
 
-/** Whose key a member's is, while rules.json registers them: taken out of it, their key is nobody's at once. */
-function memberOf(call: Call) {
-  const person = keyHolder(call, "person");
-  return person !== null && personOf(call.rules, person) ? person : null;
-}
+/** Whose key a member's is. Someone taken out of rules.json has none: it went with them. What changes anything is
+ * asked again where it's decided, as a request's body can be a long time coming. */
+const memberOf = (call: Call) => keyHolder(call, "person");
 
 function requireMember(call: Call) {
   const person = memberOf(call);
@@ -217,7 +215,9 @@ async function cardAction(call: Call, id: number, action: string) {
     return json({ changed: act(call, "resolve", id, reason.trim(), "本人") });
   }
   if (action === "answer") {
-    const who = channel ? { by: given?.by, ref: given?.ref, channel } : member ? { person: member } : { by: "本人" };
+    // The key goes along with a member's answer: whose it is gets asked again where the answer is decided.
+    const theirs = member && { person: member, key: call.token };
+    const who = channel ? { by: given?.by, ref: given?.ref, channel } : theirs || { by: "本人" };
     return json(act(call, "answer", id, { choice: given?.choice, text: given?.text, ...who }));
   }
   if (!Number.isInteger(given?.version)) throw new InputError("要说明是哪个版本");
@@ -329,7 +329,7 @@ async function route(call: Call): Promise<Response> {
   if (method === "POST" && path === "/v1/me/events") {
     // Who it's from is whose key it came with, never anything the message says.
     const member = requireMember(call);
-    return json(act(call, "say", member, await readJson(request)));
+    return json(act(call, "say", member, token, await readJson(request)));
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);

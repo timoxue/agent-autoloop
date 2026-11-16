@@ -1,6 +1,6 @@
 // Everything that can change the hub is decided here: given the view and one input, the facts to record and the answer
 // to give. Time and secrets come in as arguments, so the same input on the same view always decides the same.
-import { credential, digest, type Environment } from "./credentials.ts";
+import { credential, digest, whose, type Environment } from "./credentials.ts";
 import { latestBefore, nextRun, parseCron } from "./cron.ts";
 import { deadlines, MINUTE, offlineCard, OFFLINE_AFTER, RUN_LEASE, SEEN_EVERY, WORKER_FRESH } from "./due.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
@@ -10,7 +10,6 @@ import {
   cardView,
   configuration,
   eventsOf,
-  fromOwnMachine,
   jobOf,
   openInScope,
   pauseOf,
@@ -28,6 +27,7 @@ import {
   PEOPLE,
   peopleOf,
   personOf,
+  personWorkers,
   ruleOf,
   SCHEDULE,
   takesFrom,
@@ -293,7 +293,10 @@ function cardFromReceipt(draft: Draft, run: Row, kind: string, card: Row): Rejec
   const fyi = kind === "notice" && card.fyi === true;
   // The rule keeps its notices from the owner. One for someone else is theirs to hear: unsent it would stay open unseen.
   const quiet = kind === "notice" && rule?.tell === "never" && card.to === undefined;
-  const origin = { source: sourceOf(draft.view, run.id), agent: run.agent, session, run: run.id };
+  // For someone, it also keeps which machine this execution ran on, as it stands now: the run may be handed to another
+  // before the card is answered.
+  const madeOn = card.to === undefined ? {} : { worker: workerOf(draft.view, run) };
+  const origin = { source: sourceOf(draft.view, run.id), agent: run.agent, session, run: run.id, ...madeOn };
   const thread = `thread:${run.rule}:${run.lane}:${name}`;
   // Each person's own, so asking one doesn't stand in for asking another, or the owner. Their id comes first and holds
   // no colon: no name an Agent gives a card can make one key read as another's.
@@ -557,7 +560,14 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   return { rejected };
 }
 
+/** Whose key this is, as things stand where the decision is made: the door looked before the request's body came, and
+ * the person may have been taken out, or the key taken back or replaced, since. */
+function memberHolding(draft: Draft, person: string, key: unknown) {
+  if (typeof key !== "string" || whose(draft.view, "person", key) !== person) throw new AuthError("要成员自己的密钥");
+}
+
 function answer(draft: Draft, id: number, given: Row) {
+  if (given.person !== undefined) memberHolding(draft, given.person, given.key);
   const card = draft.view.get("cards", id);
   if (!card) throw new NotFound("没有这张卡片");
   if (given.channel !== undefined) {
@@ -573,7 +583,7 @@ function answer(draft: Draft, id: number, given: Row) {
     // A member's own key. A card that isn't theirs is as missing as one never made: they can't learn which there are.
     if (card.to !== given.person) throw new NotFound("没有这张卡片");
     // Anything on their machine can read their key, an unattended Agent too: it mustn't answer what it asked itself.
-    if (fromOwnMachine(draft.view, draft.rules, card, given.person)) {
+    if (personWorkers(draft.rules, given.person).includes(card.worker)) {
       throw new AuthError("这张卡片是你名下的电脑上跑的一轮发的，不能用成员密钥回答：在通道里收到它的地方回答");
     }
   } else if (card.to !== undefined) {
@@ -763,6 +773,8 @@ const CONTROL = {
     for (const id of [...events].sort((a, b) => a - b)) {
       const event = draft.view.get("events", id);
       if (!event || !JSON.parse(event.paused ?? "[]").includes(name) || taken(id)) continue;
+      // A member's message is the rule's to take only while its sender is registered and the rule takes from them.
+      if (!takesFrom(draft.rules, rule, event.from)) continue;
       runs.add(enqueue(draft, rule, id, rule.parallel ? event.subject : ""));
       replayed.push(id);
     }
@@ -797,6 +809,10 @@ const CONTROL = {
 const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
   rules(draft, rules) {
     put(draft, "config", "rules", { value: rules, version: draft.seq });
+    // Someone taken out of the file loses their key with it: whoever is registered under that id next isn't them.
+    for (const key of rows(draft.view, "keys", { kind: "person" })) {
+      if (!personOf(rules, key.name)) set(draft, "keys", `person:${key.name}`, null);
+    }
     for (const run of rows(draft.view, "runs", { state: "queued" })) {
       if (ruleOf(rules, run.rule)) assignQueued(draft, run);
       else stopRun(draft, run, "rule-gone", ...ruleGone(run.rule));
@@ -822,7 +838,10 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     return ingest(draft, source, given, true);
   },
   /** A member's message, an event like any other. Not theirs to read back as a source reads its own. */
-  say: (draft, person, given) => ingest(draft, PEOPLE, given, false, person),
+  say(draft, person, key, given) {
+    memberHolding(draft, person, key);
+    return ingest(draft, PEOPLE, given, false, person);
+  },
   createCard,
   /** A task elsewhere asks you; your answer goes on like a round of a rule, where its cwd says. */
   ask(draft, name, given) {

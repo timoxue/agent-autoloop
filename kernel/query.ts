@@ -1,7 +1,7 @@
 // Reading the view: what the decisions and the doors ask of it, and the shapes they hand out.
 import { credential, type Environment } from "./credentials.ts";
 import { rows, type Fact, type Row, type View } from "./evolve.ts";
-import { addressOf, peopleOf, personOf, ruleOf, type Rule, type Rules } from "./rules.ts";
+import { addressOf, peopleOf, personOf, personWorkers, ruleOf, type Rule, type Rules } from "./rules.ts";
 import type { Job } from "../protocol/job.ts";
 
 export function configuration(view: View, version?: number): Rules {
@@ -103,13 +103,6 @@ export function recipientOf(rules: Rules, card: Row, channel: string) {
   return { id: card.to as string, name: rules.people![card.to].name, address };
 }
 
-/** Whether a round on one of this person's own machines made the card. */
-export function fromOwnMachine(view: View, rules: Rules, card: Row, person: string) {
-  const run = card.run_id == null ? undefined : view.get("runs", card.run_id);
-  const worker = run && workerOf(view, run);
-  return worker !== undefined && (personOf(rules, person)?.workers ?? []).includes(worker);
-}
-
 /** How many settled cards a member is shown. */
 const RECENT = 20;
 
@@ -119,7 +112,7 @@ export function mineOf(view: View, rules: Rules, env: Environment, person: strin
   // One their key can't answer says so, or they'd only find out by trying.
   const shown = (card: Row) => ({
     ...cardView(card, env),
-    ...(fromOwnMachine(view, rules, card, person) && { channelOnly: true }),
+    ...(personWorkers(rules, person).includes(card.worker) && { channelOnly: true }),
   });
   return {
     me: { id: person, name: personOf(rules, person)?.name ?? person },

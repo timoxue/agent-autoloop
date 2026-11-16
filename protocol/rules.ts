@@ -136,8 +136,8 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
       // Only members' messages have a sender the hub knows: on any other source it would read as a filter and be none.
       [
         "from",
-        (value) => when.source === PEOPLE && isSomeWords(value),
-        `只能写在 "source": "${PEOPLE}" 的规则里，是人的编号的列表，或者 ["*"]`,
+        (value) => when.source === PEOPLE && rules.people !== undefined && isSomeWords(value),
+        `只能写在登记了 people 之后 "source": "${PEOPLE}" 的规则里，是人的编号的列表，或者 ["*"]`,
         true,
       ],
     ]);
@@ -158,13 +158,15 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     issues.push(`${where}的 skill 和 prompt 至少写一个`);
   }
   if (isObject(rule.emits)) {
-    // A receipt's event has no sender, and what members send comes only with their own keys.
-    const emittable: Check = (value) => value !== SCHEDULE && value !== PEOPLE && isKeyOf(rules.sources)(value);
+    // A receipt's event has no sender, and what members send comes only with their own keys. That source is the
+    // members' only once people are registered: before that it's whatever the file made it.
+    const members = (value: unknown) => value === PEOPLE && rules.people !== undefined;
+    const emittable: Check = (value) => value !== SCHEDULE && !members(value) && isKeyOf(rules.sources)(value);
     checkFields(issues, `${where}的 emits `, rule.emits, [
       [
         "source",
         emittable,
-        rule.emits.source === PEOPLE
+        members(rule.emits.source)
           ? "不能是成员的来源：那里的消息只有成员自己的密钥能发"
           : `不是已登记的来源：${rule.emits.source}`,
       ],

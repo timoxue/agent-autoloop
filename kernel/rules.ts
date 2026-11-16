@@ -76,6 +76,9 @@ export const cronOf = (rule: Rule) => (rule.when as { cron: string }).cron;
 export const personOf = (rules: Rules, id: string): Person | undefined =>
   Object.hasOwn(rules.people ?? {}, id) ? rules.people![id] : undefined;
 
+/** The machines that are a person's own. */
+export const personWorkers = (rules: Rules, id: string): string[] => personOf(rules, id)?.workers ?? [];
+
 /** Where a channel reaches a person, if it does: what it sends a card for them to, and who may answer it there. */
 export function addressOf(rules: Rules, person: string, channel: string): string | undefined {
   const at = personOf(rules, person)?.at ?? {};
