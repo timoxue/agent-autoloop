@@ -46,6 +46,9 @@ export function hubClient(url: string, key: string) {
       call("POST", `/v1/cards/${card}/failed`, { body: { version, error } }),
     answer: (card: number, body: { choice?: number; text?: string; by?: string; ref?: string }) =>
       call("POST", `/v1/cards/${card}/answer`, { body }),
+    // A member's door: what's for them, and what they have to say.
+    me: () => call("GET", "/v1/me"),
+    say: (body: unknown) => call("POST", "/v1/me/events", { body }),
     // Sources, the owner and tasks elsewhere.
     event: (body: unknown) => call("POST", "/v1/events", { body }),
     tell: (body: unknown) => call("POST", "/v1/tell", { body }),

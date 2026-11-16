@@ -2,7 +2,7 @@
 // rules between them and, only to be shown, the scheduled tasks that run elsewhere. A mistake is caught here with a
 // message saying where: at start it stops the hub, later it leaves the old rules running and the owner is told.
 import { nextRun, parseCron } from "../kernel/cron.ts";
-import { SCHEDULE, type Rule, type Rules } from "../kernel/rules.ts";
+import { PEOPLE, SCHEDULE, type Rule, type Rules } from "../kernel/rules.ts";
 
 export class RulesError extends Error {
   readonly issues: string[];
@@ -71,7 +71,8 @@ function checkFields(issues: string[], where: string, value: unknown, spec: Fiel
 /** An address is who may answer there, and the hub checks a channel's `by` against it, so it has the same limit. */
 const isAddress: Check = (value) => isText(value) && [...(value as string)].length <= 500;
 
-/** Each person reachable on some channel that sends by recipient, and no address shared: it would answer for both. */
+/** No address shared: it would answer for both. Someone with no address at all is reached by their own key; an address
+ * written where no card for them can go is a mistake, most likely a channel missing its "people": true. */
 function checkPeople(issues: string[], rules: Rules) {
   const taken = new Map<string, string>();
   for (const [id, person] of Object.entries(rules.people ?? {})) {
@@ -79,7 +80,7 @@ function checkPeople(issues: string[], rules: Rules) {
     const where = `人 ${id} `;
     checkFields(issues, where, person, [
       ["name", isText, NOT_EMPTY],
-      ["at", isObject, "要是 { 通道编号: 这个人在那个通道上的地址 }"],
+      ["at", isObject, "要是 { 通道编号: 这个人在那个通道上的地址 }", true],
       [
         "workers",
         (value) => isWords(value) && (value as string[]).every(isId),
@@ -87,7 +88,7 @@ function checkPeople(issues: string[], rules: Rules) {
         true,
       ],
     ]);
-    if (!isObject(person) || !isObject(person.at)) continue;
+    if (!isObject(person) || !isObject(person.at) || !Object.keys(person.at).length) continue;
     for (const [channel, address] of Object.entries(person.at)) {
       if (!Object.hasOwn(rules.channels, channel)) issues.push(`${where}的 at 不是已登记的通道：${channel}`);
       else if (!isAddress(address)) issues.push(`${where}在通道 ${channel} 上的地址要是 500 字以内的文字`);
@@ -96,7 +97,9 @@ function checkPeople(issues: string[], rules: Rules) {
       } else taken.set(`${channel}\n${address}`, id);
     }
     if (!Object.keys(person.at).some((channel) => rules.channels[channel]?.people === true)) {
-      issues.push(`${where}在写了 "people": true 的通道上都没有地址，发给他的卡片送不出去`);
+      issues.push(
+        `${where}在写了 "people": true 的通道上都没有地址，发给他的卡片送不出去；只用成员密钥、不走通道就不写 at`,
+      );
     }
   }
 }
@@ -130,7 +133,19 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     checkFields(issues, `${where}的 when `, when, [
       ["source", isKeyOf(rules.sources), `不是已登记的来源：${when.source}`],
       ["types", isTypes, "要是事件类型的列表，可以用 x.* 或 *"],
+      // Only members' messages have a sender the hub knows: on any other source it would read as a filter and be none.
+      [
+        "from",
+        (value) => when.source === PEOPLE && isSomeWords(value),
+        `只能写在 "source": "${PEOPLE}" 的规则里，是人的编号的列表，或者 ["*"]`,
+        true,
+      ],
     ]);
+    for (const person of when.source === PEOPLE && isSomeWords(when.from) ? (when.from as string[]) : []) {
+      if (person !== "*" && !Object.hasOwn(rules.people ?? {}, person)) {
+        issues.push(`${where}的 when 的 from 不是已登记的人：${person}`);
+      }
+    }
   } else if (isObject(when)) {
     if (isCron(when.cron) && nextRun(parseCron(when.cron as string)!, now, rules.timezone) === null) {
       issues.push(`${where}的定时永远不会到来：${when.cron}`);
@@ -143,9 +158,16 @@ function checkRule(issues: string[], rules: Rules, rule: Rule, names: Set<string
     issues.push(`${where}的 skill 和 prompt 至少写一个`);
   }
   if (isObject(rule.emits)) {
-    const emittable: Check = (value) => value !== SCHEDULE && isKeyOf(rules.sources)(value);
+    // A receipt's event has no sender, and what members send comes only with their own keys.
+    const emittable: Check = (value) => value !== SCHEDULE && value !== PEOPLE && isKeyOf(rules.sources)(value);
     checkFields(issues, `${where}的 emits `, rule.emits, [
-      ["source", emittable, `不是已登记的来源：${rule.emits.source}`],
+      [
+        "source",
+        emittable,
+        rule.emits.source === PEOPLE
+          ? "不能是成员的来源：那里的消息只有成员自己的密钥能发"
+          : `不是已登记的来源：${rule.emits.source}`,
+      ],
       ["types", isTypes, "要是事件类型的列表"],
     ]);
   }
@@ -195,6 +217,11 @@ export function parseRules(json: string, now: number, timezone: string): Rules {
     ]);
   }
   rules.sources[SCHEDULE] = { name: "定时" };
+  // Only with people registered: a file that registers no one keeps whatever source it calls this, and gains none.
+  if (rules.people !== undefined) {
+    if (PEOPLE in rules.sources) issues.push(`登记了 people 之后，来源 ${PEOPLE} 是保留的（成员发的消息），换个编号`);
+    else rules.sources[PEOPLE] = { name: "成员" };
+  }
   for (const [id, channel] of Object.entries(rules.channels)) {
     if (!ID.test(id)) issues.push(`通道的编号${ID_WORDS}：${id}`);
     checkFields(issues, `通道 ${id} `, channel, [

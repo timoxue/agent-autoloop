@@ -3,8 +3,8 @@ import { cardPage, PAGE_HEADERS, wordsPage } from "./card-page.ts";
 import { whose, type Environment } from "./credentials.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
 import { iso, type Row, type View } from "./evolve.ts";
-import { agentsOf, cancels, cardView, configuration, eventOutcome } from "./query.ts";
-import { eventRule, ruleOf } from "./rules.ts";
+import { agentsOf, cancels, cardView, configuration, eventOutcome, mineOf } from "./query.ts";
+import { eventRule, personOf, ruleOf } from "./rules.ts";
 import { isAsk } from "../protocol/validate.ts";
 
 export type Services = {
@@ -87,6 +87,18 @@ function requireKey(call: Call, kind: string) {
   const holder = keyHolder(call, kind);
   if (!holder) throw new AuthError(`要${KEY_HOLDERS[kind]}自己的密钥`);
   return holder;
+}
+
+/** Whose key a member's is, while rules.json registers them: taken out of it, their key is nobody's at once. */
+function memberOf(call: Call) {
+  const person = keyHolder(call, "person");
+  return person !== null && personOf(call.rules, person) ? person : null;
+}
+
+function requireMember(call: Call) {
+  const person = memberOf(call);
+  if (!person) throw new AuthError("要成员自己的密钥");
+  return person;
 }
 
 function ownerAct(call: Call, type: string, ...args: any[]) {
@@ -193,7 +205,9 @@ async function nextCard(call: Call) {
 
 async function cardAction(call: Call, id: number, action: string) {
   const channel = keyHolder(call, "channel");
-  requireKey(call, action === "resolve" || (action === "answer" && !channel) ? "owner" : "channel");
+  // An answer is a channel's to pass on, a member's to give to what's theirs, or the owner's.
+  const member = action === "answer" && !channel ? memberOf(call) : null;
+  if (!member) requireKey(call, action === "resolve" || (action === "answer" && !channel) ? "owner" : "channel");
   const given = await readJson(call.request);
   if (action === "resolve") {
     const reason = given?.reason;
@@ -203,7 +217,7 @@ async function cardAction(call: Call, id: number, action: string) {
     return json({ changed: act(call, "resolve", id, reason.trim(), "本人") });
   }
   if (action === "answer") {
-    const who = channel ? { by: given?.by, ref: given?.ref, channel } : { by: "本人" };
+    const who = channel ? { by: given?.by, ref: given?.ref, channel } : member ? { person: member } : { by: "本人" };
     return json(act(call, "answer", id, { choice: given?.choice, text: given?.text, ...who }));
   }
   if (!Number.isInteger(given?.version)) throw new InputError("要说明是哪个版本");
@@ -284,7 +298,7 @@ async function route(call: Call): Promise<Response> {
   const path = call.url.pathname;
   if (method === "GET" && path === "/healthz") return json({ ok: true, commit: services.commit });
   // A key's name is whatever `key new` was given; it only has to stay one path segment when encoded.
-  const key = /^\/v1\/keys\/(source|worker|channel|owner)\/([^/]+)$/.exec(path);
+  const key = /^\/v1\/keys\/(source|worker|channel|owner|person)\/([^/]+)$/.exec(path);
   if (method === "DELETE" && key) {
     requireKey(call, "owner");
     let name: string;
@@ -308,6 +322,14 @@ async function route(call: Call): Promise<Response> {
     const found = eventOutcome(call.view, requireKey(call, "source"), Number(sent[1]));
     if (!found) throw new NotFound("没有这条事件");
     return json(found);
+  }
+  if (method === "GET" && path === "/v1/me") {
+    return json({ ...mineOf(call.view, call.rules, services.environment, requireMember(call)), now: iso(call.now) });
+  }
+  if (method === "POST" && path === "/v1/me/events") {
+    // Who it's from is whose key it came with, never anything the message says.
+    const member = requireMember(call);
+    return json(act(call, "say", member, await readJson(request)));
   }
   if (method === "POST" && path === "/v1/tell") return tell(call);
   if (method === "GET" && path === "/v1/work") return work(call);

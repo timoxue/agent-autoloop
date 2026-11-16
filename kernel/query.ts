@@ -1,7 +1,7 @@
 // Reading the view: what the decisions and the doors ask of it, and the shapes they hand out.
 import { credential, type Environment } from "./credentials.ts";
 import { rows, type Fact, type Row, type View } from "./evolve.ts";
-import { addressOf, peopleOf, ruleOf, type Rule, type Rules } from "./rules.ts";
+import { addressOf, peopleOf, personOf, ruleOf, type Rule, type Rules } from "./rules.ts";
 import type { Job } from "../protocol/job.ts";
 
 export function configuration(view: View, version?: number): Rules {
@@ -103,6 +103,31 @@ export function recipientOf(rules: Rules, card: Row, channel: string) {
   return { id: card.to as string, name: rules.people![card.to].name, address };
 }
 
+/** Whether a round on one of this person's own machines made the card. */
+export function fromOwnMachine(view: View, rules: Rules, card: Row, person: string) {
+  const run = card.run_id == null ? undefined : view.get("runs", card.run_id);
+  const worker = run && workerOf(view, run);
+  return worker !== undefined && (personOf(rules, person)?.workers ?? []).includes(worker);
+}
+
+/** How many settled cards a member is shown. */
+const RECENT = 20;
+
+/** What a member's key shows them: who they are and the cards for them, newest first. Nothing of anyone else's. */
+export function mineOf(view: View, rules: Rules, env: Environment, person: string) {
+  const mine = { to: person };
+  // One their key can't answer says so, or they'd only find out by trying.
+  const shown = (card: Row) => ({
+    ...cardView(card, env),
+    ...(fromOwnMachine(view, rules, card, person) && { channelOnly: true }),
+  });
+  return {
+    me: { id: person, name: personOf(rules, person)?.name ?? person },
+    cards: rows(view, "cards", { state: "open", ...mine }, undefined, true).map(shown),
+    recentCards: rows(view, "cards", { state: ["decided", "done", "closed"], ...mine }, RECENT, true).map(shown),
+  };
+}
+
 export function cardView(
   card: Row,
   env: Environment,
@@ -162,9 +187,12 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
     context: {
-      events: events.map(({ key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops }) => {
+      events: events.map((event) => {
+        const { key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops, from } = event;
         const sourceName = rules.sources[source]?.name ?? source;
-        return { id, source, sourceName, type, subject, summary, detail, link, receivedAt, hops: hops ?? 0 };
+        // Whose key a member's message came with: who to write back to.
+        const sender = from !== undefined && { from: { id: from, name: personOf(rules, from)?.name ?? from } };
+        return { id, source, sourceName, type, subject, summary, detail, link, receivedAt, hops: hops ?? 0, ...sender };
       }),
       answers: answers.map(({ id: card, title, options, choice, answer: text, about, by, decided_at: at }) => {
         const picked: string[] = JSON.parse(options);

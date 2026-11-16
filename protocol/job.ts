@@ -33,6 +33,8 @@ export type Job = {
       link: string;
       receivedAt: string;
       hops?: number;
+      /** The member who sent it, on a message that came with a member's key. */
+      from?: { id: string; name: string };
     }[];
     answers: {
       card: number;
