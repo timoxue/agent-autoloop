@@ -148,7 +148,9 @@ function settleSession(draft: Draft, run: Row) {
   const carried = run.session ?? run.resume;
   let session = carried;
   if (!session && rule?.resume) {
-    const [last] = rows(draft.view, "runs", { ...thread, state: ["done", "nothing", "cancelled"] }, 1, true);
+    // Not a round that was passed: its session believes what it asked for was done, and none of it was.
+    const ended = { ...thread, state: ["done", "nothing", "cancelled"], passed_by: null };
+    const [last] = rows(draft.view, "runs", ended, 1, true);
     if (last?.state !== "cancelled" && last?.agent === rule.to) session = last.session;
   }
   if (!session) return;
@@ -354,12 +356,21 @@ function sweep(draft: Draft) {
 
 /**
  * A matter handed to a newer round goes on from here without the rounds the hub lost track of: the newer one was told
- * nothing of what they may still hand in. Each is marked once, with the round that took the matter first, in the same
- * fact as the claim, so nothing later has to work out who came after whom from rules or runs that may have changed.
+ * nothing of what they may still hand in. Each is marked once, with the round that took the matter, in the same fact as
+ * the claim, so nothing later has to work out who came after whom from rules or runs that may have changed. What a
+ * lost round had taken goes with the matter: its events, and with them the answers and look-agains come due, are the
+ * newer round's from here. The lost one's receipt won't count, so left with it they would be nobody's to handle.
  */
 function passLost(draft: Draft, run: Row) {
   const lost = rows(draft.view, "runs", { rule: run.rule, lane: run.lane, state: "unknown" });
-  for (const older of lost) if (older.passed_by == null) put(draft, "runs", older.id, { passed_by: run.id });
+  for (const older of lost) {
+    if (older.passed_by != null) continue;
+    put(draft, "runs", older.id, { passed_by: run.id });
+    for (const { event_id } of rows(draft.view, "run_events", { run_id: older.id })) {
+      put(draft, "run_events", `${run.id}:${event_id}`, { run_id: run.id, event_id });
+      set(draft, "run_events", `${older.id}:${event_id}`, null);
+    }
+  }
 }
 
 function claimNext(draft: Draft, worker: string, claim: string) {
@@ -391,11 +402,9 @@ function claimNext(draft: Draft, worker: string, claim: string) {
     passLost(draft, run);
   }
   const since = held ? { claimed_at: run.claimed_at, link: run.link } : { claimed_at: draft.at, link: null };
-  // Handed out again, a run that was passed while lost is the newest round of its matter. Only such a run has the mark.
-  const newest = run.passed_by == null ? {} : { passed_by: null };
   const rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
   const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
-  put(draft, "runs", run.id, { ...claiming, ...newest, ...nulls("last_issued", "last_result", "last_answer") });
+  put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
   return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env);
 }
 
@@ -604,16 +613,23 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
     const { kept, dropped } =
       run.passed_by == null ? { kept: result, dropped: [] } : lateReceipt(result, run.passed_by);
     const failed = result.outcome === "failed";
-    rejected = [...dropped, ...(failed ? retryLater(draft, run, kept) : applyReceipt(draft, run, kept))];
-    // One that failed runs again and loses nothing. One that ended has lost what it asked for, and only the owner can
-    // have it done again.
+    if (failed && run.passed_by != null) {
+      // Nothing is left for it to try again on: what it had taken is the newer round's.
+      const summary = `这件事已经交给第 ${run.passed_by} 轮，这一轮不再重试`;
+      const error = (result.error ?? "").trim() || null;
+      put(draft, "runs", id, { state: "cancelled", finished_at: draft.at, summary, error, cancel_at: null });
+      closeStopped(draft, id, summary);
+      rejected = dropped;
+    } else rejected = [...dropped, ...(failed ? retryLater(draft, run, kept) : applyReceipt(draft, run, kept))];
+    // What it had taken is being handled by the newer round, so nothing is owed. What the owner hears of is what this
+    // round made of it and asked for, which is gone.
     if (dropped.length && !failed) {
       const lost = REQUESTS.filter((what) => result[what]?.length).map((what) =>
         REQUEST_WORDS[what].replace("#", String(result[what]!.length)),
       );
       const words =
-        `这一轮交回结果时，这件事已经交给后面的第 ${run.passed_by} 轮了，它回执里的${lost.join("、")}没有生效` +
-        `（agent-autoloop why ${id} 看是哪些）。还要做就重新触发这件事。`;
+        `这一轮交回结果时，这件事已经交给第 ${run.passed_by} 轮了，它回执里的${lost.join("、")}没有生效` +
+        `（agent-autoloop why ${id} 看是哪些）。它领走的事件、回答和到期的复查已经由第 ${run.passed_by} 轮接着处理。`;
       notify(draft, `run:${id}:late`, run.rule, words, threadOf(run));
     }
   }

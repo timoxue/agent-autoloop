@@ -214,7 +214,8 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
     context: {
-      // For an Agent that is a script: it reads this file, not the prompt, and these are the hub's own words, not anyone's.
+      // For an Agent that is a script: it reads this file, not the prompt. The rule is as rules.json has it; the lane
+      // is the subject its events came with, held to identifier characters at the door.
       rule: { name, ...(people && { people }), ...(emits && { emits }) },
       lane: run.lane,
       // The hub's clock when this execution was handed out: the same however often the job is fetched or run again.
