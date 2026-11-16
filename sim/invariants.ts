@@ -100,15 +100,25 @@ export function settled(
   if (asked && result.outcome !== "failed") assert.ok(hears, "迟到的回执丢了东西，没告诉本人");
 }
 /**
- * `voided` is the caller's own record of the rounds whose receipts came in after their matter was handed on, and so
- * count for nothing. Every event a rule took stays with a round of that rule, as before; and that round is never one
- * of these: an event, an answer or a look-again come due is with a round whose receipt can still count, or was with
- * one whose receipt did. Left with a voided round it would be nobody's.
+ * `passed` is the caller's own record of the rounds whose matter was handed to a newer round while they were out, kept
+ * from the moment that round was handed out, whether or not the passed one ever hands in. Every event a rule took is
+ * held by one round of that rule and no more, and answers and look-agains come due go where their events are. Where
+ * that round stands says what has become of them, and it is one of three things:
+ * - waiting: the round is queued, or out and not passed, and its receipt can still count;
+ * - handled: the round ended with a receipt that counted;
+ * - ended with their round: the owner stopped it, or it failed too often or lost its rule, and they stay on record
+ *   with it, set off again by nothing.
+ * It is never a round that was passed: its receipt counts for nothing, so held by it they would be nobody's.
  */
-export function invariants(current: View, log: Fact[], before?: Snapshot, voided?: Set<number>) {
+export function invariants(current: View, log: Fact[], before?: Snapshot, passed?: { has(run: number): boolean }) {
   const view = snapshot(current);
-  for (const link of rows(view, "run_events"))
-    assert.ok(!voided?.has(link.run_id), "事件、回答或到期的复查留在了回执不算数的一轮名下");
+  const holders = new Set<string>();
+  for (const link of rows(view, "run_events")) {
+    assert.ok(!passed?.has(link.run_id), "事件、回答或到期的复查留在了已经被接手的一轮名下");
+    const holder = JSON.stringify([link.event_id, view.tables.runs[link.run_id]?.rule]);
+    assert.ok(!holders.has(holder), "同一条事件被同一条规则的两轮拿着");
+    holders.add(holder);
+  }
   assert.deepEqual(view, replay(log), "日志重放记录不同");
   for (const [index, fact] of log.entries()) assert.equal(fact.seq, index + 1, "日志序号不连续");
   const events = rows(view, "events");

@@ -95,8 +95,8 @@ export class World {
    * receipts came in from such a round asking for something. */
   lead = new Map<string, number>();
   passer = new Map<number, number>();
-  /** The rounds that handed in after being passed: nothing they took may still be theirs. */
-  voided = new Set<number>();
+  /** The rounds out now: handed out and not yet handed in. */
+  out = new Set<number>();
   late = 0;
   takenBy = new Map<number, string>();
   madeOn = new Map<number, string | undefined>();
@@ -197,15 +197,18 @@ export class World {
       const last = this.lead.get(this.matter(run)!);
       // What it had taken went on with its matter: there's nothing for it to be handed out again with.
       assert.ok(!this.passer.has(run), "被接手的一轮又被派了出去");
-      if (last !== undefined && last !== run && !this.passer.has(last)) this.passer.set(last, run);
+      // Only a round still out is passed: one that ended, or went back to wait, keeps what it took.
+      if (last !== undefined && last !== run && this.out.has(last) && !this.passer.has(last))
+        this.passer.set(last, run);
+      this.out.add(run);
       this.lead.set(this.matter(run)!, run);
     }
     if (input.type === "finish" && !d.value.duplicate) {
       settled(d.facts, before, id, passed, result, d.value);
-      if (passed !== undefined) this.voided.add(id);
+      this.out.delete(id);
       if (passed && ["ask", "notice", "resolve", "later", "events"].some((what) => result[what]?.length)) this.late++;
     }
-    this.checked = invariants(this.view, this.log, before, this.voided);
+    this.checked = invariants(this.view, this.log, before, this.passer);
     return d.value;
   }
   /** An input through its door, with the key that door goes by now. What the hub does of itself has none. */
@@ -224,7 +227,7 @@ export class World {
   restart() {
     this.view.close();
     this.view = evolve(empty(), this.log);
-    this.checked = invariants(this.view, this.log);
+    this.checked = invariants(this.view, this.log, undefined, this.passer);
     this.transitions++;
   }
   alarm() {

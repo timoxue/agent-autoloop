@@ -629,7 +629,7 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
       );
       const words =
         `这一轮交回结果时，这件事已经交给第 ${run.passed_by} 轮了，它回执里的${lost.join("、")}没有生效` +
-        `（agent-autoloop why ${id} 看是哪些）。它领走的事件、回答和到期的复查已经由第 ${run.passed_by} 轮接着处理。`;
+        `（agent-autoloop why ${id} 看是哪些）。它领走的事件、回答和到期的复查已经随这件事交给接手的轮次。`;
       notify(draft, `run:${id}:late`, run.rule, words, threadOf(run));
     }
   }
