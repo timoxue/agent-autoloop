@@ -190,12 +190,29 @@ test("late checks reject a hub that drops what a round nothing passed asked for"
   assert.throws(() => w.finish(old.run, booking), /没被超过/);
 });
 
-test("late checks reject a hub that leaves what a lost round took with a round whose receipt no longer counts", () => {
+test("late checks reject a hub that leaves what a lost round took with it, whether or not it ever hands in", () => {
   const { w, old, newer } = passedRound();
-  assert.equal(w.finish(old.run, booking).rejected.length, 1);
-  // As a hub that handed nothing on would have it: the events are with a round the simulation knows was passed.
-  w.voided.add(newer.run);
-  assert.throws(() => w.call("ingest", "app", { id: "c", type: "two", subject: "#2" }), /回执不算数/);
+  // As a hub that handed nothing on would have written the claim: the same log without the events changing hands.
+  const log = structuredClone(w.log);
+  const claim = log.findLast((f) => f.type === "claimNext")!;
+  assert.ok(claim.changes.some((c) => c.table === "run_events" && c.key.startsWith(`${newer.run}:`)));
+  claim.changes = claim.changes.filter((c) => c.table !== "run_events" && c.table !== "due");
+  assert.throws(() => invariants(evolve(empty(), log), log, undefined, w.passer), /已经被接手的一轮名下/);
+  // The old round never comes back; the record of who took its matter is enough.
+  assert.equal(w.view.get("runs", old.run)!.state, "unknown");
+});
+
+test("event checks reject an event that two rounds of one rule hold", () => {
+  const w = new World();
+  w.call("ingest", "app", { id: "a", type: "one", subject: "#1" });
+  const log = structuredClone(w.log);
+  const [link] = log.at(-1)!.changes.filter((c) => c.table === "run_events");
+  const twin = { ...structuredClone(log.at(-1)!.changes.find((c) => c.table === "runs")!), key: "9" };
+  twin.row!.id = 9;
+  log
+    .at(-1)!
+    .changes.push(twin, { table: "run_events", key: `9:${link.row!.event_id}`, row: { ...link.row!, run_id: 9 } });
+  assert.throws(() => invariants(evolve(empty(), log), log), /两轮/);
 });
 
 test("the simulation catches omitted deadlines that strand deferred work", () => {

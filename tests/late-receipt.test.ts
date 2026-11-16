@@ -361,6 +361,9 @@ test("what a late receipt lost shows in its answer and in why, and the owner is 
     /重新触发|后面的/,
     "what it took is with the newer round: there's nothing to set off again",
   );
+  // Whoever took the matter first may have lost it to a later round since: the note doesn't say who has it now.
+  assert.doesNotMatch(notice.text, /由第 \d+ 轮接着处理/);
+  assert.match(notice.text, /已经随这件事交给接手的轮次/);
   const timeline = formatWhy(old.run, why(old.run) as any);
   assert.match(timeline, new RegExp(`这件事交给了第 ${newer} 轮`));
   assert.equal(timeline.match(/未执行：/g)?.length, 3);
