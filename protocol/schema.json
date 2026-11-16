@@ -537,6 +537,57 @@
         "context": {
           "type": "object",
           "properties": {
+            "rule": {
+              "description": "The rule again, for an Agent that reads only the context file.",
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "people": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["id", "name"],
+                    "additionalProperties": true
+                  }
+                },
+                "emits": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    },
+                    "types": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": ["source", "types"],
+                  "additionalProperties": true
+                }
+              },
+              "required": ["name"],
+              "additionalProperties": true
+            },
+            "lane": {
+              "description": "The matter this round is of.",
+              "type": "string"
+            },
+            "claimedAt": {
+              "description": "When the hub handed this execution out, by its own clock.",
+              "type": "string"
+            },
             "events": {
               "type": "array",
               "items": {
@@ -1050,6 +1101,16 @@
           },
           "required": ["id", "name"],
           "additionalProperties": true
+        },
+        "rule": {
+          "type": "string"
+        },
+        "lane": {
+          "type": "string"
+        },
+        "key": {
+          "description": "The key its receipt gave it; absent on a card that was given none.",
+          "type": "string"
         }
       },
       "required": ["card", "title", "text", "at"],
@@ -1069,6 +1130,9 @@
           "type": ["string", "null"]
         },
         "at": {
+          "type": "string"
+        },
+        "key": {
           "type": "string"
         }
       },

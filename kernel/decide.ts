@@ -352,6 +352,16 @@ function sweep(draft: Draft) {
   }
 }
 
+/**
+ * A matter handed to a newer round goes on from here without the rounds the hub lost track of: the newer one was told
+ * nothing of what they may still hand in. Each is marked once, with the round that took the matter first, in the same
+ * fact as the claim, so nothing later has to work out who came after whom from rules or runs that may have changed.
+ */
+function passLost(draft: Draft, run: Row) {
+  const lost = rows(draft.view, "runs", { rule: run.rule, lane: run.lane, state: "unknown" });
+  for (const older of lost) if (older.passed_by == null) put(draft, "runs", older.id, { passed_by: run.id });
+}
+
 function claimNext(draft: Draft, worker: string, claim: string) {
   const agents = agentsOf(draft.view, worker);
   const runs = rows(draft.view, "runs", { state: ["queued", "claimed"] });
@@ -378,11 +388,14 @@ function claimNext(draft: Draft, worker: string, claim: string) {
   if (!held) {
     assignQueued(draft, run);
     settleSession(draft, draft.view.get("runs", run.id)!);
+    passLost(draft, run);
   }
   const since = held ? { claimed_at: run.claimed_at, link: run.link } : { claimed_at: draft.at, link: null };
+  // Handed out again, a run that was passed while lost is the newest round of its matter. Only such a run has the mark.
+  const newest = run.passed_by == null ? {} : { passed_by: null };
   const rules_version = held ? run.rules_version : draft.view.get("config", "rules")!.version;
   const claiming = { state: "claimed", claim, issued: draft.seq, seen_at: draft.at, rules_version, ...since };
-  put(draft, "runs", run.id, { ...claiming, ...nulls("last_issued", "last_result", "last_answer") });
+  put(draft, "runs", run.id, { ...claiming, ...newest, ...nulls("last_issued", "last_result", "last_answer") });
   return jobOf(draft.view, draft.view.get("runs", run.id)!, draft.env);
 }
 
@@ -535,6 +548,32 @@ function applyReceipt(draft: Draft, run: Row, result: Result) {
   return rejected;
 }
 
+/** What a receipt asks of the hub, as against how its round ended. */
+const REQUESTS = ["ask", "notice", "resolve", "later", "events"] as const;
+const REQUEST_WORDS = {
+  ask: "提问 # 张",
+  notice: "通知 # 张",
+  resolve: "结案 # 项",
+  later: "复查 # 个",
+  events: "事件 # 条",
+};
+
+/**
+ * A receipt in after its matter went to a newer round, cut down to how its own round ended. It was written by what the
+ * matter was before that round, which never saw it: a look-again put back, a card opened or closed, an event sent now
+ * would undo or contradict what the newer round did. All of it or none: half a receipt is a state neither round meant.
+ */
+function lateReceipt(result: Result, newer: number) {
+  const reason = `这一轮交回时，这件事已经交给第 ${newer} 轮了，迟到的这一项不生效`;
+  const kept: Result = { ...result };
+  const dropped: Rejected[] = [];
+  for (const what of REQUESTS) {
+    for (const item of result[what] ?? []) dropped.push({ ...("card" in item && { card: item.card }), what, reason });
+    delete kept[what];
+  }
+  return { kept, dropped };
+}
+
 function finish(draft: Draft, id: number, token: string, given: unknown) {
   const hash = digest(JSON.stringify(given ?? null));
   const prior = draft.view.get("runs", id);
@@ -561,8 +600,23 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
     });
     clearFiredTimers(draft, run);
     closeStopped(draft, id, "已停止");
-  } else if (result.outcome === "failed") rejected = retryLater(draft, run, result);
-  else rejected = applyReceipt(draft, run, result);
+  } else {
+    const { kept, dropped } =
+      run.passed_by == null ? { kept: result, dropped: [] } : lateReceipt(result, run.passed_by);
+    const failed = result.outcome === "failed";
+    rejected = [...dropped, ...(failed ? retryLater(draft, run, kept) : applyReceipt(draft, run, kept))];
+    // One that failed runs again and loses nothing. One that ended has lost what it asked for, and only the owner can
+    // have it done again.
+    if (dropped.length && !failed) {
+      const lost = REQUESTS.filter((what) => result[what]?.length).map((what) =>
+        REQUEST_WORDS[what].replace("#", String(result[what]!.length)),
+      );
+      const words =
+        `这一轮交回结果时，这件事已经交给后面的第 ${run.passed_by} 轮了，它回执里的${lost.join("、")}没有生效` +
+        `（agent-autoloop why ${id} 看是哪些）。还要做就重新触发这件事。`;
+      notify(draft, `run:${id}:late`, run.rule, words, threadOf(run));
+    }
+  }
   put(draft, "runs", id, { last_answer: JSON.stringify(rejected) });
   return { rejected };
 }

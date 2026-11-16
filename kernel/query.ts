@@ -1,5 +1,5 @@
 // Reading the view: what the decisions and the doors ask of it, and the shapes they hand out.
-import { credential, type Environment } from "./credentials.ts";
+import { credential, digest, type Environment } from "./credentials.ts";
 import { AuthError, NotFound } from "./errors.ts";
 import { rows, type Fact, type Row, type View } from "./evolve.ts";
 import { addressOf, peopleOf, personOf, personWorkers, ruleOf, type Rule, type Rules } from "./rules.ts";
@@ -96,6 +96,22 @@ export function openInScope(view: View, run: Row) {
     (card) => card.created_at <= run.claimed_at,
   );
 }
+
+/**
+ * The key a receipt gave a card, read back off the key it's kept under: its rule and matter come first there, after
+ * whom it's for, and both are on the card. A card given none was named by its words, and has none to give back.
+ */
+export function givenKey(card: Row): string | undefined {
+  const thread = `thread:${card.rule}:${card.lane}:`;
+  const prefix = card.to === undefined ? thread : `to:${card.to}:${thread}`;
+  if (typeof card.key !== "string" || !card.key.startsWith(prefix)) return undefined;
+  const name = card.key.slice(prefix.length);
+  return name === digest(`${card.title}\n${card.text}`).slice(0, 32) ? undefined : name;
+}
+const keyed = (card: Row) => {
+  const key = givenKey(card);
+  return key === undefined ? {} : { key };
+};
 
 /** Whom a card is for, as a channel that reaches them needs it: the person, and their address on that channel. */
 export function recipientOf(rules: Rules, card: Row, channel: string) {
@@ -198,6 +214,11 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
     session: run.session ?? run.resume,
     askFirst: rules.askFirst,
     context: {
+      // For an Agent that is a script: it reads this file, not the prompt, and these are the hub's own words, not anyone's.
+      rule: { name, ...(people && { people }), ...(emits && { emits }) },
+      lane: run.lane,
+      // The hub's clock when this execution was handed out: the same however often the job is fetched or run again.
+      claimedAt: run.claimed_at,
       events: events.map((event) => {
         const { key: id, source, type, subject, summary, detail, link, received_at: receivedAt, hops, from } = event;
         const sourceName = rules.sources[source]?.name ?? source;
@@ -221,18 +242,27 @@ export function jobOf(view: View, run: Row, env: Environment): Job {
       }),
       timers: timers.map(timerView),
       waiting: waiting.sort((a, b) => a.at.localeCompare(b.at)).map(timerView),
-      open: openInScope(view, run).map(({ id, title, text, created_at, to }) => ({
-        card: id,
-        title,
-        text,
-        at: created_at,
-        // Whose it is, when not the owner's: the same words may be out to several people, and one may need taking back.
-        ...(to !== undefined && { to: { id: to, name: rules.people?.[to]?.name ?? to } }),
-      })),
+      open: openInScope(view, run).map((card) => {
+        const { id, title, text, created_at, to } = card;
+        return {
+          card: id,
+          title,
+          text,
+          at: created_at,
+          // Whose it is, when not the owner's: the same words may be out to several people, and one may need taking back.
+          ...(to !== undefined && { to: { id: to, name: rules.people?.[to]?.name ?? to } }),
+          // Which matter it belongs to: the group's open cards are all here, other matters' and other rules' too.
+          ...(card.rule != null && { rule: card.rule }),
+          lane: card.lane,
+          ...keyed(card),
+        };
+      }),
       decided: decided
         .filter((card) => !answers.some((answer) => answer.id === card.id))
-        .map(({ id, title, choice, answer, options, decided_at }) => {
-          return { card: id, title, choice: choice === null ? answer : JSON.parse(options)[choice], at: decided_at };
+        .map((card) => {
+          const { id, title, choice, answer, options, decided_at } = card;
+          const chosen = choice === null ? answer : JSON.parse(options)[choice];
+          return { card: id, title, choice: chosen, at: decided_at, ...keyed(card) };
         }),
     },
   };
