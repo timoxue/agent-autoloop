@@ -9,7 +9,12 @@
 // differently; a rule with no `parallel`, whose every event is one matter, isn't covered; a round of another rule that
 // shares the group and the subject counts as having taken the matter; what was dropped can't be seen in the answer, in
 // `why` or by the owner, or the owner is told when nothing was dropped; the round's own ending (state, summary, usage,
-// session, the answer it carried out) is lost with the rest; a claim leaves a mark in the log when nothing was passed.
+// session) is lost with the rest; a claim leaves a mark in the log when nothing was passed. What the lost round had
+// taken (an answer, a look-again come due, the events) stays with it when its matter goes on: the newer round never
+// sees them, the answer is marked carried out and the look-again cleared by a receipt that asked in vain, and nothing
+// ever handles them; or a late round that failed is run again with nothing to run on; the source that sent an event
+// is shown the late round, ended, with nothing sent, as if that were what came of it; a later round goes on in the
+// late round's session, which believes everything it asked for was done.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -46,13 +51,15 @@ writeFileSync(
       }),
       rule("同组", "peer", { group: "work", parallel: 3 }),
       rule("单线", "plain", { tell: "always" }),
+      rule("续接", "resume", { parallel: 3, resume: true }),
     ],
   }),
 );
 setup("late-receipt", rulesFile);
 
 const hub = await import("./hub.ts");
-const { answer, claimNext, finish, heartbeat, ingest, logAfter, sweep, why } = hub;
+const { answer, claimNext, finish, getView, heartbeat, ingest, logAfter, sweep, tick, why } = hub;
+const { eventOutcome } = await import("../kernel/query.ts");
 const { AuthError } = await import("../kernel/errors.ts");
 const { all, one } = await import("./storage.ts");
 
@@ -187,7 +194,7 @@ test("a run tried again after failing is the newest round of its matter, not a l
   assert.equal(cards(subject).length, 1);
 });
 
-test("a late round that failed is tried again, says nothing meanwhile, and its next go counts in full", () => {
+test("a late round that failed isn't run again: what it had taken went on with the newer round", () => {
   const { subject, t } = fresh();
   const old = take(subject, t);
   lose(old.run, t);
@@ -200,12 +207,12 @@ test("a late round that failed is tried again, says nothing meanwhile, and its n
     ["notice"],
   );
   assert.deepEqual(cards(subject), []);
-  assert.deepEqual(told(old.run), [], "it will run again: nothing is lost, so the owner isn't told");
-  assert.equal(stateOf(old.run), "queued");
-  const retry = claimNext("w1", `c${++n}`, at(t + 20))!;
-  assert.equal(retry.run, old.run);
-  assert.deepEqual(finish(retry.run, retry.token, done({ later: [later("等阿达")] }), at(t + 21)).rejected, []);
-  assert.deepEqual(follow(subject), [{ key: "follow", about: "等阿达" }]);
+  assert.deepEqual(told(old.run), [], "nothing is lost, so the owner isn't told");
+  const ended = one<{ state: string; summary: string }>("SELECT state, summary FROM runs WHERE id = ?", [old.run])!;
+  assert.equal(ended.state, "cancelled");
+  assert.match(ended.summary, new RegExp(`第 ${newer.run} 轮`));
+  assert.equal(claimNext("w1", `c${++n}`, at(t + 200)), null, "nothing is left to hand out");
+  assert.deepEqual(follow(subject), [{ key: "follow", about: "等小波" }]);
 });
 
 test("a newer round that was handed out and then failed has still taken the matter from the lost one", () => {
@@ -300,7 +307,7 @@ for (const [index, [what, receipt]] of kinds.entries()) {
   });
 }
 
-test("a late round's own ending is kept: state, summary, usage, session, the answer it carried out, the rule's every-round note", () => {
+test("a late round's own ending is kept: state, summary, usage, session, the rule's every-round note", () => {
   const { t } = fresh();
   const first = take("", t, "plain.one");
   const ask = { title: "要不要回滚", text: "线上报错", options: ["回滚", "再等等"], key: `q${n}` };
@@ -310,6 +317,7 @@ test("a late round's own ending is kept: state, summary, usage, session, the ans
   const old = claimNext("w1", `c${++n}`, at(t + 2))!;
   lose(old.run, t + 2);
   const newer = take("", t + 9, "plain.two");
+  // The answer went on with the newer round, and is carried out when that one ends.
   finish(newer.run, newer.token, done(), at(t + 10));
   const result = { ...done({ later: [later("旧的")] }), summary: "照回答办了", session: "s-old", usage: { input: 5 } };
   finish(old.run, old.token, result, at(t + 11));
@@ -330,7 +338,7 @@ test("a late round's own ending is kept: state, summary, usage, session, the ans
     one<{ state: string; result: string }>("SELECT state, result FROM cards WHERE key = ?", [key]);
   assert.deepEqual(one("SELECT state, result FROM cards WHERE id = ?", [question]), {
     state: "done",
-    result: "照回答办了",
+    result: "办了",
   });
   assert.equal(card(`run:${old.run}:unknown`)!.state, "closed");
   assert.equal(card(`run:${old.run}:done`)!.state, "closed", "the rule tells of every round done, and this one was");
@@ -348,6 +356,11 @@ test("what a late receipt lost shows in its answer and in why, and the owner is 
   assert.match(notice.text, new RegExp(`第 ${newer} 轮`));
   assert.match(notice.text, /提问 1 张、结案 1 项、复查 1 个/);
   assert.match(notice.text, new RegExp(`agent-autoloop why ${old.run}`));
+  assert.doesNotMatch(
+    notice.text,
+    /重新触发|后面的/,
+    "what it took is with the newer round: there's nothing to set off again",
+  );
   const timeline = formatWhy(old.run, why(old.run) as any);
   assert.match(timeline, new RegExp(`这件事交给了第 ${newer} 轮`));
   assert.equal(timeline.match(/未执行：/g)?.length, 3);
@@ -355,6 +368,75 @@ test("what a late receipt lost shows in its answer and in why, and the owner is 
   const quiet = passed();
   assert.deepEqual(finish(quiet.old.run, quiet.old.token, done(), at(quiet.t)).rejected, []);
   assert.deepEqual(told(quiet.old.run), [], "it asked for nothing, so nothing was lost");
+});
+
+test("what a lost round had taken goes on with the newer round: its answer, its look-again come due, its events", () => {
+  const { subject, t } = fresh();
+  const first = take(subject, t);
+  const soon = { key: "follow", at: new Date(at(t + 3)).toISOString(), about: "等阿达，到点提醒" };
+  finish(first.run, first.token, done({ ask: [{ ...offer("x"), to: undefined }], later: [soon] }), at(t + 1));
+  const [question] = cards(subject);
+  answer(question.id, { choice: 0, by: "本人" }, at(t + 2));
+  // The clock brings every look-again due by now, other tests' too: their rounds are ended here, this matter's kept.
+  tick(at(t + 3));
+  let old!: NonNullable<ReturnType<typeof claimNext>>;
+  for (let job; (job = claimNext("w1", `c${++n}`, at(t + 3)));) {
+    if (job.context.lane === subject) old = job;
+    else finish(job.run, job.token, done(), at(t + 3));
+  }
+  assert.deepEqual([old.context.answers.length, old.context.timers.length], [1, 1]);
+  lose(old.run, t + 3);
+  const newer = take(subject, t + 10);
+  assert.deepEqual(
+    newer.context.answers.map(({ card, chosen, about }) => ({ card, chosen, about })),
+    old.context.answers.map(({ card, chosen, about }) => ({ card, chosen, about })),
+  );
+  assert.deepEqual(newer.context.timers, [{ key: "follow", about: "等阿达，到点提醒", at: soon.at }]);
+  assert.deepEqual(
+    newer.context.events.map((event) => event.type),
+    ["card.answered", "timer.due", "assign.request"],
+  );
+  // The old round hands in late, having done its part outside: nothing it took is settled by that.
+  finish(old.run, old.token, done({ later: [later("旧的")] }), at(t + 11));
+  const fired = () => all("SELECT id FROM timers WHERE lane = ? AND event_id IS NOT NULL", [subject]).length;
+  assert.equal(one<{ state: string }>("SELECT state FROM cards WHERE id = ?", [question.id])!.state, "decided");
+  assert.equal(fired(), 1, "the look-again that came due is still there for the round that has it");
+  finish(newer.run, newer.token, { outcome: "failed", error: "网络断了" }, at(t + 12));
+  const retry = claimNext("w1", `c${++n}`, at(t + 20))!;
+  assert.deepEqual([retry.run, retry.context.answers.length, retry.context.timers.length], [newer.run, 1, 1]);
+  finish(retry.run, retry.token, { ...done(), summary: "接着办完了" }, at(t + 21));
+  assert.deepEqual(one("SELECT state, result FROM cards WHERE id = ?", [question.id]), {
+    state: "done",
+    result: "接着办完了",
+  });
+  assert.equal(fired(), 0);
+});
+
+test("the source that sent an event is shown the round that has it now, not the late one whose receipt was cut", () => {
+  const { subject, t } = fresh();
+  const sent = ingest("app", event(subject), at(t));
+  const old = claimNext("w1", `c${++n}`, at(t))!;
+  lose(old.run, t);
+  const newer = take(subject, t + 7);
+  finish(old.run, old.token, { ...done({ later: [later("旧的")] }), summary: "旧的结论" }, at(t + 8));
+  const seen = () =>
+    eventOutcome(getView(), "app", sent.event)!.runs.map(({ run, state, summary }) => [run, state, summary]);
+  assert.deepEqual(seen(), [[newer.run, "claimed", null]]);
+  finish(newer.run, newer.token, { ...done(), summary: "新的结论" }, at(t + 9));
+  assert.deepEqual(seen(), [[newer.run, "done", "新的结论"]]);
+});
+
+test("a later round doesn't go on in the session of a round that was passed", () => {
+  const { subject, t } = fresh();
+  const first = take(subject, t, "resume.one");
+  finish(first.run, first.token, { ...done(), session: "s-first" }, at(t + 1));
+  const old = take(subject, t + 2, "resume.two");
+  lose(old.run, t + 2);
+  const newer = take(subject, t + 9, "resume.three");
+  lose(newer.run, t + 9);
+  finish(old.run, old.token, { ...done(), session: "s-passed" }, at(t + 16));
+  const next = take(subject, t + 17, "resume.four");
+  assert.equal(next.session, "s-first", "the last round whose receipt counted");
 });
 
 test("a late round's token is still its own: another execution's, or the newer round's, doesn't hand in for it", () => {
