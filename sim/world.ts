@@ -95,6 +95,8 @@ export class World {
    * receipts came in from such a round asking for something. */
   lead = new Map<string, number>();
   passer = new Map<number, number>();
+  /** The rounds that handed in after being passed: nothing they took may still be theirs. */
+  voided = new Set<number>();
   late = 0;
   takenBy = new Map<number, string>();
   madeOn = new Map<number, string | undefined>();
@@ -193,16 +195,17 @@ export class World {
     if (input.type === "claimNext" && d.value) {
       const { run } = d.value;
       const last = this.lead.get(this.matter(run)!);
+      // What it had taken went on with its matter: there's nothing for it to be handed out again with.
+      assert.ok(!this.passer.has(run), "被接手的一轮又被派了出去");
       if (last !== undefined && last !== run && !this.passer.has(last)) this.passer.set(last, run);
-      // Handed out again itself, it's the newest round of its matter.
-      this.passer.delete(run);
       this.lead.set(this.matter(run)!, run);
     }
     if (input.type === "finish" && !d.value.duplicate) {
       settled(d.facts, before, id, passed, result, d.value);
+      if (passed !== undefined) this.voided.add(id);
       if (passed && ["ask", "notice", "resolve", "later", "events"].some((what) => result[what]?.length)) this.late++;
     }
-    this.checked = invariants(this.view, this.log, before);
+    this.checked = invariants(this.view, this.log, before, this.voided);
     return d.value;
   }
   /** An input through its door, with the key that door goes by now. What the hub does of itself has none. */

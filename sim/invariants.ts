@@ -49,8 +49,9 @@ const REQUESTS = ["ask", "notice", "resolve", "later", "events"];
  * the first round the matter was handed to after this one, by the caller's own record of the claims it saw, in the
  * order it saw them, and nothing the hub keeps or works out; none when this is still the newest. A round that a newer
  * one has passed leaves the matter as the newer one has it: no look-again booked, moved or cancelled, no card made or
- * closed, no event sent, and each thing it asked for turned down, naming that round. One that wasn't passed has its
- * look-agains in effect.
+ * closed, no event sent, and each thing it asked for turned down, naming that round. What it had taken went on with
+ * the matter, so it settles none of it: no answer marked carried out, no look-again that came due cleared. One that
+ * wasn't passed has its look-agains in effect.
  */
 export function settled(
   facts: Fact[],
@@ -78,8 +79,9 @@ export function settled(
   for (const { table, key, row } of changes) {
     const was = before.tables[table][key];
     if (table === "timers" && own(row ?? was))
-      // One that already came due is cleared when its round ends, and was never the matter's to wait on.
-      assert.ok(was && was.event_id !== null && row === null, "迟到的回执改了事项的复查");
+      assert.fail(was && was.event_id !== null ? "迟到的回执清掉了到期的复查，没人处理它" : "迟到的回执改了事项的复查");
+    if (table === "cards" && row?.state === "done" && was?.state !== "done")
+      assert.fail("迟到的回执把没人处理的回答记成了已执行");
     if (table === "events") assert.ok(was, "迟到的回执发出了事件");
     if (table !== "cards" || !row) continue;
     // What the hub itself says about the run is the run's own.
@@ -90,14 +92,23 @@ export function settled(
   const asked = REQUESTS.reduce((count, what) => count + (result[what]?.length ?? 0), 0);
   if (result.outcome === "cancelled") return;
   const named = ack.rejected.filter((item: Row) => item.reason.includes(`第 ${passer} 轮`));
-  assert.ok(named.length >= asked, "迟到的回执没说清哪些没生效、事项交给了哪一轮");
+  // Each thing once, for that reason alone: turned down for another as well, it was looked at as if it could count.
+  assert.ok(named.length === asked && ack.rejected.length === asked, "迟到的回执没说清哪些没生效、事项交给了哪一轮");
   // One that failed runs again; one that ended has lost what it asked for, and the owner has to hear of it.
   const told = (row?: Row | null) => row?.key === `run:${run}:late` && row.state === "open";
   const hears = changes.some(({ table, row }) => table === "cards" && told(row)) || rows(before, "cards").some(told);
   if (asked && result.outcome !== "failed") assert.ok(hears, "迟到的回执丢了东西，没告诉本人");
 }
-export function invariants(current: View, log: Fact[], before?: Snapshot) {
+/**
+ * `voided` is the caller's own record of the rounds whose receipts came in after their matter was handed on, and so
+ * count for nothing. Every event a rule took stays with a round of that rule, as before; and that round is never one
+ * of these: an event, an answer or a look-again come due is with a round whose receipt can still count, or was with
+ * one whose receipt did. Left with a voided round it would be nobody's.
+ */
+export function invariants(current: View, log: Fact[], before?: Snapshot, voided?: Set<number>) {
   const view = snapshot(current);
+  for (const link of rows(view, "run_events"))
+    assert.ok(!voided?.has(link.run_id), "事件、回答或到期的复查留在了回执不算数的一轮名下");
   assert.deepEqual(view, replay(log), "日志重放记录不同");
   for (const [index, fact] of log.entries()) assert.equal(fact.seq, index + 1, "日志序号不连续");
   const events = rows(view, "events");

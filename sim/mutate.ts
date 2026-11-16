@@ -134,8 +134,17 @@ const edits: [string, string, string, string][] = [
     '{ rule: run.rule, lane: run.lane, state: "unknown" }',
     '{ grp: run.grp, lane: run.lane, state: "unknown" }',
   ],
-  ["late-first-passer-kept", "decide.ts", "if (older.passed_by == null) put(", "if (true) put("],
-  ["late-newest-again-on-retry", "decide.ts", "run.passed_by == null ? {} : { passed_by: null }", "{}"],
+  ["late-first-passer-kept", "decide.ts", "if (older.passed_by != null) continue;", ""],
+  ["late-failed-not-retried", "decide.ts", "if (failed && run.passed_by != null) {", "if (false) {"],
+  // What the lost round had taken goes on with its matter, and is no longer the lost round's.
+  [
+    "late-inputs-handed-on",
+    "decide.ts",
+    'put(draft, "run_events", `${run.id}:${event_id}`, { run_id: run.id, event_id });',
+    "",
+  ],
+  ["late-inputs-not-left", "decide.ts", 'set(draft, "run_events", `${older.id}:${event_id}`, null);', ""],
+  ["late-session-not-resumed", "decide.ts", '"cancelled"], passed_by: null };', '"cancelled"] };'],
   ...["ask", "notice", "resolve", "later", "events"].map((what): [string, string, string, string] => [
     `late-${what}-dropped`,
     "decide.ts",

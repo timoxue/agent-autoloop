@@ -8,7 +8,8 @@
 // link stops opening its card, so a hub that decides what came in on a dead one is never met; such a hub, or one that
 // lets a source's door record what only the clock does, goes unnoticed. No round is ever lost and then passed by a
 // newer one of its matter before it hands in, so a hub that lets its late receipt put the matter back, or one that
-// drops the receipt of a round nothing passed, is never met; such a hub goes unnoticed.
+// drops the receipt of a round nothing passed, is never met; such a hub goes unnoticed. So does one that cuts the late
+// receipt and leaves what that round had taken (events, an answer, a look-again come due) with it, for no one.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { simulate } from "../sim/random.ts";
@@ -187,6 +188,14 @@ test("late checks reject a hub that drops what a round nothing passed asked for"
   // By the simulation's own record this round is still the newest of its matter; the hub has it marked as passed.
   w.passer.delete(old.run);
   assert.throws(() => w.finish(old.run, booking), /没被超过/);
+});
+
+test("late checks reject a hub that leaves what a lost round took with a round whose receipt no longer counts", () => {
+  const { w, old, newer } = passedRound();
+  assert.equal(w.finish(old.run, booking).rejected.length, 1);
+  // As a hub that handed nothing on would have it: the events are with a round the simulation knows was passed.
+  w.voided.add(newer.run);
+  assert.throws(() => w.call("ingest", "app", { id: "c", type: "two", subject: "#2" }), /回执不算数/);
 });
 
 test("the simulation catches omitted deadlines that strand deferred work", () => {
