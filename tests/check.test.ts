@@ -87,6 +87,6 @@ test("a rule on the clock's source passes, with a hint that no source can send i
   writeFileSync(file, JSON.stringify(rules));
   const done = cli({ AGENT_AUTOLOOP_HOME: join(home, "hint-home") }, "check", file);
   assert.equal(done.status, 0, done.stderr);
-  assert.match(done.stdout, /提示：规则「等定时」.*schedule.*cron/);
+  assert.match(done.stdout, /提示：规则「等定时」.*schedule.*不能再靠来源密钥接收新事件.*cron/);
   assert.doesNotMatch(cli({ AGENT_AUTOLOOP_HOME: join(home, "hint-home") }, "check", draft).stdout, /提示/);
 });

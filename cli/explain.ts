@@ -61,7 +61,7 @@ export function peopleHints(rules: Rules): string[] {
     if (eventRule(rule) && rule.when.source === SCHEDULE) {
       hints.push(
         `规则「${rule.name}」的 when.source 是 ${SCHEDULE}：这个来源名留给定时，来源的密钥往里发事件返回 401，` +
-          "这条规则只有手动 run、它自己的卡片被回答或复查到期时才会跑。要定时跑写 cron；要接事件，换成自己登记的来源",
+          "这条规则不能再靠来源密钥接收新事件。要定时跑写 cron；要接事件，换成自己登记的来源",
       );
     }
     if (!eventRule(rule) || rule.when.source !== PEOPLE) continue;
