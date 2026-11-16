@@ -114,11 +114,11 @@ Claude 主任务要委托 Codex 操作网页时，从 `examples/recipes/browser-
 "rules": [{ "name": "指派", "…": "…", "people": ["m-fe-1"] }]
 ```
 
-规则的 `people` 是这条规则能点名的人，`["*"]` 是所有登记的人，没写就一个也点不了。Agent 在回执的 `ask`、`notice` 里写 `"to": "m-fe-1"` 就发给他，不写还是发给用户。这样的卡片只有他本人在飞书里点才算数，用户的 `answer` 会被拒绝，不用他决定了用 `agent-autoloop resolve <卡片> <结果>` 撤回；它没有回答链接，所以只会发文字的 Webhook 通道发不了。写了地址的人至少要有一个地址在写了 `"people": true` 的通道上，不然 `agent-autoloop check` 会报错；一个地址都不写的人只靠下面的成员密钥收和答。
+规则的 `people` 是这条规则能点名的人，`["*"]` 是所有登记的人，没写就一个也点不了。Agent 在回执的 `ask`、`notice` 里写 `"to": "m-fe-1"` 就发给他，不写还是发给用户。这样的卡片只有他本人能回答（在飞书里点，或者用下面说的成员密钥），用户的 `answer` 会被拒绝，不用他决定了用 `agent-autoloop resolve <卡片> <结果>` 撤回；它没有回答链接，所以只会发文字的 Webhook 通道发不了。写了地址的人至少要有一个地址在写了 `"people": true` 的通道上，不然 `agent-autoloop check` 会报错；一个地址都不写的人只靠下面的成员密钥收和答。
 
 **让成员在自己的电脑上用**（成员问自己的 Agent“我今天做什么”，接受或退回发给他的卡片，干活中途提问、报告卡住或进度）：成员要先登记在 `people` 里。和用户确认给谁之后：
 
-1. 中台那台电脑上 `agent-autoloop key new person <人的编号>`，密钥只显示这一次，交给这位成员本人。收回用 `agent-autoloop key remove person <人的编号>`。
+1. 中台那台电脑上 `agent-autoloop key new person <人的编号>`，密钥只显示这一次，交给这位成员本人。收回用 `agent-autoloop key remove person <人的编号>`，立刻生效。从 `people` 里删掉这个人也会作废他的密钥，但要连同点他名的规则（`when.from`、规则的 `people`）一起改好、规则文件能加载才算数；之后同一个编号再登记要重新发密钥。
 2. 成员的电脑上装好程序并连上：`curl -fsSL https://raw.githubusercontent.com/KKKKhazix/agent-autoloop/main/install.sh | sh -s -- join https://中台地址 --person <人的编号> --key <密钥>`（已经装过就直接 `agent-autoloop join …`）。它先向中台核对这把密钥是不是这个人的，对了才写配置，不装系统服务。中台要有成员的电脑连得上的地址，见下面“放到服务器、加电脑”。
 3. 成员用 `agent-autoloop me` 看发给自己的卡片，`agent-autoloop answer <卡片> <序号>` 回答，`agent-autoloop say <类型> <要说的话>` 向中台说一件事；或者把 `agent-autoloop mcp` 配给自己的命令行 Agent，它会有 `me`、`answer`、`say` 三个工具。回答代表成员本人的决定，Agent 要先问过他再答。
 4. 要让 Agent 处理成员说的话，写一条接成员消息的规则，并许可它把答复发回去：
@@ -254,7 +254,7 @@ gh api repos/owner/app/statuses/<完整提交编号> -f context=delivery-agent/<
 
 MCP 客户端的启动程序填 `node`，参数为本机引擎绝对路径 `bin/agent-autoloop.ts`、`mcp`，环境里传 `AGENT_AUTOLOOP_HOME`。支持 stdio 2025-11-25 版，使用本机 `config.json` 已有密钥，不把密钥写进客户端参数。工具按已有身份显示；不自动创建权限。
 
-MCP 服务不区分调用方，都按本人记录（`answer` 记成本人，`emit` 不带层数）。不要把它配进接单程序启动的 CLI 的用户级配置，否则一轮能自己回答自己的卡片。本机只有成员密钥时它是成员模式，只有 `me`、`answer`、`say` 三个工具，都按这个成员记录，同样不要配进接单程序启动的 CLI。
+MCP 服务不区分调用方，都按本人记录（`answer` 记成本人，`emit` 不带层数）。不要把它配进接单程序启动的 CLI 的用户级配置，否则一轮能自己回答自己的卡片。本机有成员密钥、没有本人密钥时它是成员模式，只有 `me`、`answer`、`say` 三个工具，都按这个成员记录，同样不要配进接单程序启动的 CLI。
 
 `agent-autoloop key remove <source|worker|channel|owner|person> <名字>` 立即收回对应密钥（成员密钥的名字是人的编号），长轮询和日志订阅也立即失效；已经领到的活仍可用这一轮的独立 token 交结果。
 
