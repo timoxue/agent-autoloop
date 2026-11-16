@@ -55,6 +55,8 @@ description: 配置 Agent 自动化中台：加规则、接新的事件插件、
 2. **对方有自己的 Webhook 格式**：在 `~/.agent-autoloop/plugins/<名字>/source.ts` 写一个函数，验签并翻译成事件（见 `plugins/github/source.ts`），来源写 `"adapter": "<名字>"`，地址是 `/v1/in/<来源>`，秘密放 `~/.agent-autoloop/secrets.env` 的 `AGENT_AUTOLOOP_SECRET_<来源>`（来源名转大写，`-` 换成 `_`），改完重启中台（`agent-autoloop service install`）。对方要能连到中台，所以中台要在服务器上，或者用隧道。
 3. **对方推不过来，或者中台在家里**：定时跑一段脚本轮询，见 `examples/watch-github-issues.sh`。规则用 `use: "command"` 的 Agent，写上 `emits`。没新东西不花 Token。
 
+脚本读不到提示词，只读资料文件（环境变量 `AGENT_AUTOLOOP_CONTEXT`）。里面除了事件、回答、复查和卡片，还有：`rule`（规则名、能点名的人 `people`、能发的事件 `emits`，名单不用在命令行里再写一遍）、`lane`（这一轮是哪个事项的）、`claimedAt`（中台派出这一轮的时刻，要“现在”就用它，不读本机时钟，同一轮重跑结果才一样）；`open` 里每张卡片带它所属的 `rule`、`lane` 和回执里写的 `key`，按这三项认哪张是这件事的。脚本的回执点了规则没许可的人，中台只拒那一张，其余照常生效，被拒的在 `agent-autoloop why <第几轮>` 里。一轮没了音信、这件事又派出过更新的一轮之后，旧的一轮再交回只记它自己的结局，回执里要中台做的事不生效，用户会收到一张通知，见协议的“迟到的回执”。
+
 ## 接一个 Agent
 
 任何能打印最后一条消息的命令，在 `rules.json` 的 `agents` 写一行：

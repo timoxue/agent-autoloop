@@ -7,14 +7,16 @@
 | 对象 | 状态与存储 | 谁在哪里改 |
 | --- | --- | --- |
 | 事件 | `events` 的 `source + key` 去重；`routed/paused/hops` 区分已派、暂停跳过、无人接、超过 8 层未派，记下后不再改；补跑不改事件，接到这条规则的一轮上就算补过；成员用密钥发的记在来源 `people` 下，`from` 是发的人，`key` 是 `from:<人>:<他写的 id>`，`hops` 总是 0 | `kernel/decide.ts` 的 `ingest/recordEvent` 接来源、回执、回答、时钟和手动运行；来源的门不收 `schedule`（定时）名下的事件，登记了 `people` 时也不收 `people` 名下的；`say` 接成员的消息，走同一个 `ingest`；`replayRule` 补跑暂停跳过的事件 |
-| 事项 | 没有单独状态列；`rule + lane` 对应的轮次、未结卡片、未来复查共同表达进展 | `enqueue/answer/tick/retryLater`；运行中来的事件排下一轮，失败时把同事项的队列合进重试轮次 |
-| 轮次 | `runs.state`: `queued → claimed → done/nothing/cancelled`；`claimed → unknown`；失败从 claimed/unknown 回 queued，`attempts/not_before` 表达等重试 | `claimNext/finish/applyReceipt/retryLater/cancel/stopRun/sweep`。unknown 不是失败，迟到结果照收，后续新活可以继续 |
+| 事项 | 没有单独状态列；`rule + lane` 对应的轮次、未结卡片、未来复查共同表达进展；`unknown` 轮次上的 `passed_by` 记着这个事项在它之后先交给了哪一轮 | `enqueue/answer/tick/retryLater`；运行中来的事件排下一轮，失败时把同事项的队列合进重试轮次；`claimNext` 的 `passLost` 在领活的同一条事实里给同事项的 unknown 轮次记上 `passed_by` |
+| 轮次 | `runs.state`: `queued → claimed → done/nothing/cancelled`；`claimed → unknown`；失败从 claimed/unknown 回 queued，`attempts/not_before` 表达等重试 | `claimNext/finish/applyReceipt/retryLater/cancel/stopRun/sweep`。unknown 不是失败，后续新活可以继续；迟到结果照收，但带着 `passed_by` 的（同事项已经派出更新的一轮）`finish` 只记这一轮自己的结局，回执里的 ask、notice、resolve、later、events 不生效、逐项进 `rejected`，结束了且丢了东西的另发一张通知 |
 | 停止 | `claimed + cancel_at` 表示正在停；进程结束才 cancelled；排队可直接取消 | 本人 `cancel`，worker 停整个进程组后交结果；停止期间收到 failed 也归 cancelled，不能重派 |
 | 执行归属 | `agent/rules_version/issued/claim` 固定领取归属；`session/resume` 是续接提示 | `assignQueued/settleSession/claimNext/started/finish`。排队用最新规则，领取后保留原 worker 和规则快照；重复 claim 换 token |
 
 `done + open 提问`、`done + 未来复查` 都合法：只结束这一轮。连续失败最多 10 次，终态轮次不能重排。本人要再做用新事件或手动 `run`。已交回的 `last_issued/last_result/last_answer` 保证同 token 同内容重交只确认一次，不同内容返回 409。
 
 禁止同组同 lane 同时领取两轮、停止后自动重试、换 Agent 沿用旧 Agent 会话、回答/复查丢掉原 lane。unknown 放开组后，新轮仍不能打开可能在用的会话。并发、原会话及 token 检查在上述入口统一执行。
+
+unknown 的轮次被同事项更新的一轮接手之后，它的回执不能再改这个事项的复查、卡片和事件；没被接手的照常整份生效（`tests/late-receipt.test.ts` 锁着这几条）。按领活判断，不按交回：更新的一轮一领走，资料就定了。`passed_by` 只写一次，是第一个接手的轮次；这一轮没跑成、重新被领走时清掉，它又是这个事项最新的一轮。判断只看这个记号，不按交回时的规则或轮次重算；旧日志没有这个字段，按没被接手处理。事项按 `rule + lane` 算，同组别的规则、同规则别的 lane 的领活不算接手。`sim/random.ts` 里有“没了音信、同事项或旁边的事项又派出一轮、旧轮再交回”的动作，`sim/world.ts` 按模拟自己看到的领活顺序记每个事项交给了哪一轮、每个轮次先被谁接手，`sim/invariants.ts` 的 `settled` 拿这份记录核对每一份回执写了什么，不问内核。
 
 ## 卡片、投递、复查与暂停
 
@@ -73,5 +75,7 @@
 | ad0384f / #118 | FYI closed 却无 closed_at；新记录已修复，旧事实不伪造时间 |
 | f25ce4a / #113、4f971cd / #88 | 重复审查漏掉原发现；同步 main 后结束轮次导致一直追赶 main。现绑定提交、同轮同步 |
 | 5285e0e / #240、e8748fd / #242 | 多项目交付、可信审查账本、应急重试的现行边界，不能再按已退役交付进程推断 |
+
+迟到回执的处理没有线上事故作依据：场景模板的评审用真实内核复现了两种时序（旧轮把更新一轮约的复查改回去；旧轮把重新开始的事项写成已结束），脚本类 Agent 只在启动时读资料，自己挡不住。
 
 #245 用回归复现后修了三处：复查跨 Agent 携带会话、撤回缺进度终态、关闭 PR 留 pending，分别在 `tests/resume-thread.test.ts`、`tests/delivery.test.ts`、`tests/delivery-run.test.ts`。代码复现不等于已确认线上事故。
