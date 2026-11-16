@@ -180,7 +180,8 @@ export function stateOf(now: number, before: number | undefined, rules: Rules, {
     now: iso(now),
     timezone: rules.timezone,
     spending: spendingOf(all, now, rules.timezone),
-    totals: { ...tally(counts), attention: openCards.length },
+    // What waits for the owner: a card for someone else waits for them, and the owner's key can't answer it.
+    totals: { ...tally(counts), attention: openCards.filter((card) => card.to === null).length },
     cards: openCards.map(ownersCard),
     recentCards: recentCards.map(ownersCard),
     timers: timers.map(({ rule, lane, key, about, at }) => ({ rule, lane, key, about, at })),

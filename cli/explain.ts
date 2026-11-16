@@ -1,6 +1,6 @@
 // `rules explain` and `emit --dry-run`: what this machine's rules file says, without asking a hub or writing a fact.
 import { describeCron, nextRun, parseCron } from "../kernel/cron.ts";
-import { cronOf, eventRule, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
+import { cronOf, eventRule, PEOPLE, peopleOf, typeMatches, type Rule, type Rules } from "../kernel/rules.ts";
 import { parseRules } from "../protocol/rules.ts";
 import { parseEvent } from "../protocol/validate.ts";
 
@@ -9,7 +9,7 @@ const clock = (zone: string) =>
   ({ timeZone: zone, month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }) as const;
 const when = (rule: Rule, rules: Rules, now: number) =>
   eventRule(rule)
-    ? `来源 ${rule.when.source} · ${rule.when.types.join("、")}`
+    ? `来源 ${rule.when.source} · ${rule.when.types.join("、")}${rule.when.from ? ` · 只收 ${rule.when.from.join("、")} 发的` : ""}`
     : `定时 ${describeCron(cronOf(rule))}（下次 ${new Date(
         nextRun(parseCron(cronOf(rule))!, now, rules.timezone)!,
       ).toLocaleString("zh-CN", clock(rules.timezone))}）`;
@@ -27,6 +27,48 @@ function details(rule: Rule, rules: Rules, now: number) {
   if (rule.prompt) parts.push("有 Prompt");
   if (rule.emits) parts.push(`可发 ${rule.emits.source} ${rule.emits.types.join("、")}`);
   return parts.join(" · ");
+}
+
+/**
+ * What a rules file that passes leaves for its owner to do or to know, where people are concerned: nothing here is wrong,
+ * but each is easy to leave half done.
+ */
+export function peopleHints(rules: Rules): string[] {
+  const hints: string[] = [];
+  const machines = new Set(Object.values(rules.agents).map((agent) => agent.worker));
+  for (const [id, person] of Object.entries(rules.people ?? {})) {
+    // A name no Agent runs on guards nothing: most likely a slip, and the guard it was meant to be is silently off.
+    for (const worker of (person.workers ?? []).filter((worker) => !machines.has(worker))) {
+      hints.push(
+        `${id}（${person.name}）的 workers 里的 ${worker} 不是任何 Agent 的接单电脑：写错了的话，` +
+          "“他名下的电脑那一轮发给他的卡片不能用成员密钥回答”这一条对那台电脑不起作用",
+      );
+    }
+    if (Object.keys(person.at ?? {}).length) continue;
+    if (person.workers?.length) {
+      hints.push(
+        `${id}（${person.name}）写了 workers 却没有通道地址：他名下的电脑上跑的一轮发给他的卡片，成员密钥答不了，` +
+          "又没有通道能让他本人回答，只能由你撤回",
+      );
+    }
+    hints.push(
+      `${id}（${person.name}）没有通道地址：发给他的卡片只有他用成员密钥才看得到、答得了。` +
+        `给他密钥：agent-autoloop key new person ${id}`,
+    );
+  }
+  for (const rule of rules.rules) {
+    if (!eventRule(rule) || rule.when.source !== PEOPLE) continue;
+    const senders = Object.keys(rules.people ?? {}).filter((id) =>
+      (rule.when.from ?? ["*"]).some((from) => from === "*" || from === id),
+    );
+    const unanswerable = senders.filter((id) => !peopleOf(rules, rule).includes(id));
+    if (unanswerable.length) {
+      hints.push(
+        `规则「${rule.name}」接 ${unanswerable.join("、")} 发的消息，但它的 people 没许可这些人：回执不能把答复发回给他们，只能发给你`,
+      );
+    }
+  }
+  return hints;
 }
 
 /** The rules as this machine would run them, one line per thing an owner asks about. */

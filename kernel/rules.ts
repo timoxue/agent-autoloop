@@ -13,10 +13,12 @@ type AgentOptions = {
 export type Agent = AgentOptions & { name: string; worker: string; use: string; access: Access; maxActive?: number };
 /** With people, the channel's program sends a card meant for someone to that person's address on it. */
 export type Channel = { name: string; answerers?: string[]; links?: boolean; people?: boolean };
-/** Someone a card can be for: where each channel reaches them, which is also who may answer it there. */
-export type Person = { name: string; at: Record<string, string>; workers?: string[] };
+/** Someone a card can be for: where each channel reaches them, which is also who may answer it there. With no address
+ * they're reached by their own key alone. `workers` are the machines that are theirs. */
+export type Person = { name: string; at?: Record<string, string>; workers?: string[] };
 export type Tell = "always" | "needed" | "never";
-type EventFilter = { source: string; types: string[] };
+/** `from` is only for the members' source: whose messages the rule takes, all registered people when it's not written. */
+type EventFilter = { source: string; types: string[]; from?: string[] };
 type When = EventFilter | { cron: string };
 type RuleWords = { skill?: string; prompt?: string };
 /** A session's name for clients that take it from the first line: {subject} and {id} filled in by the worker. */
@@ -60,6 +62,8 @@ export type Rules = Registered & {
 
 /** The source of what the clock makes happen. */
 export const SCHEDULE = "schedule";
+/** The source of what members send with their own keys. It's there once rules.json registers people. */
+export const PEOPLE = "people";
 
 function typeMatch(pattern: string, type: string) {
   return pattern === "*" || pattern === type || (pattern.endsWith(".*") && type.startsWith(pattern.slice(0, -1)));
@@ -68,11 +72,26 @@ export const typeMatches = (patterns: string[], type: string) => patterns.some((
 export const eventRule = (rule: Rule): rule is Rule & { when: EventFilter } => "source" in rule.when;
 export const cronOf = (rule: Rule) => (rule.when as { cron: string }).cron;
 
+/** Someone rules.json registers now, by their id. */
+export const personOf = (rules: Rules, id: string): Person | undefined =>
+  Object.hasOwn(rules.people ?? {}, id) ? rules.people![id] : undefined;
+
+/** The machines that are a person's own. */
+export const personWorkers = (rules: Rules, id: string): string[] => personOf(rules, id)?.workers ?? [];
+
 /** Where a channel reaches a person, if it does: what it sends a card for them to, and who may answer it there. */
 export function addressOf(rules: Rules, person: string, channel: string): string | undefined {
-  const at = Object.hasOwn(rules.people ?? {}, person) ? rules.people![person].at : {};
+  const at = personOf(rules, person)?.at ?? {};
   return Object.hasOwn(at, channel) ? at[channel] : undefined;
 }
+
+/** Whether a rule takes an event for who sent it. Only a rule on the members' source asks: there the sender has to be
+ * registered still, and among those the rule names. With no one registered there is no such source, and a source that
+ * happens to be called the same is like any other. */
+export const takesFrom = (rules: Rules, rule: Rule & { when: EventFilter }, from?: string) =>
+  rule.when.source !== PEOPLE ||
+  rules.people === undefined ||
+  (personOf(rules, from ?? "") !== undefined && (rule.when.from ?? ["*"]).some((id) => id === "*" || id === from));
 
 /** Whom a rule's receipts may address a card to: registered people only, all of them for "*". */
 export function peopleOf(rules: Rules, rule: Rule | undefined): string[] {

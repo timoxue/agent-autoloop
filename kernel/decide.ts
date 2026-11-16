@@ -1,6 +1,6 @@
 // Everything that can change the hub is decided here: given the view and one input, the facts to record and the answer
 // to give. Time and secrets come in as arguments, so the same input on the same view always decides the same.
-import { credential, digest, type Environment } from "./credentials.ts";
+import { credential, digest, whose, type Environment } from "./credentials.ts";
 import { latestBefore, nextRun, parseCron } from "./cron.ts";
 import { deadlines, MINUTE, offlineCard, OFFLINE_AFTER, RUN_LEASE, SEEN_EVERY, WORKER_FRESH } from "./due.ts";
 import { AuthError, Conflict, InputError, NotFound } from "./errors.ts";
@@ -24,9 +24,13 @@ import {
   addressOf,
   cronOf,
   eventRule,
+  PEOPLE,
   peopleOf,
+  personOf,
+  personWorkers,
   ruleOf,
   SCHEDULE,
+  takesFrom,
   typeMatches,
   type Rule,
   type Rules,
@@ -229,19 +233,27 @@ function recordEvent(
     ...(paused.length && { paused: JSON.stringify(paused) }),
     // Through the source's own door: only these are its to read back (`eventOutcome`), not what the hub made in its name.
     ...(sent && { sent: 1 }),
+    // Whose key a member's message came with.
+    ...(event.from !== undefined && { from: event.from }),
     received_at: draft.at,
   }).id;
 }
 
-function ingest(draft: Draft, source: string, given: unknown, sent = false) {
-  const event = parseEvent(given);
+/** `from` is the member whose key a message came with: it's kept under their id, so two people's can't be taken for one,
+ * and it starts a chain of its own whatever depth it claims. */
+function ingest(draft: Draft, source: string, given: unknown, sent = false, from?: string) {
+  const parsed = parseEvent(given);
+  const event = from === undefined ? parsed : { ...parsed, id: `from:${from}:${parsed.id}`, hops: 0, from };
   const existing = rows(draft.view, "events", { source, key: event.id })[0];
   if (existing) {
     return { event: existing.id, duplicate: true, ...routingOf(existing) };
   }
   const tooDeep = event.hops > MAX_HOPS;
   const takes = (rule: Rule) =>
-    eventRule(rule) && rule.when.source === source && typeMatches(rule.when.types, event.type);
+    eventRule(rule) &&
+    rule.when.source === source &&
+    typeMatches(rule.when.types, event.type) &&
+    takesFrom(draft.rules, rule, from);
   const matched = tooDeep ? [] : draft.rules.rules.filter(takes);
   // A paused rule doesn't take the event, and nothing is kept back for it: the event is recorded as skipped for it.
   const isPaused = (rule: Rule) => !!pauseOf(draft.view, rule, draft.now);
@@ -281,7 +293,10 @@ function cardFromReceipt(draft: Draft, run: Row, kind: string, card: Row): Rejec
   const fyi = kind === "notice" && card.fyi === true;
   // The rule keeps its notices from the owner. One for someone else is theirs to hear: unsent it would stay open unseen.
   const quiet = kind === "notice" && rule?.tell === "never" && card.to === undefined;
-  const origin = { source: sourceOf(draft.view, run.id), agent: run.agent, session, run: run.id };
+  // For someone, it also keeps which machine this execution ran on, as it stands now: the run may be handed to another
+  // before the card is answered.
+  const madeOn = card.to === undefined ? {} : { worker: workerOf(draft.view, run) };
+  const origin = { source: sourceOf(draft.view, run.id), agent: run.agent, session, run: run.id, ...madeOn };
   const thread = `thread:${run.rule}:${run.lane}:${name}`;
   // Each person's own, so asking one doesn't stand in for asking another, or the owner. Their id comes first and holds
   // no colon: no name an Agent gives a card can make one key read as another's.
@@ -545,7 +560,14 @@ function finish(draft: Draft, id: number, token: string, given: unknown) {
   return { rejected };
 }
 
+/** Whose key this is, as things stand where the decision is made: the door looked before the request's body came, and
+ * the person may have been taken out, or the key taken back or replaced, since. */
+function memberHolding(draft: Draft, person: string, key: unknown) {
+  if (typeof key !== "string" || whose(draft.view, "person", key) !== person) throw new AuthError("要成员自己的密钥");
+}
+
 function answer(draft: Draft, id: number, given: Row) {
+  if (given.person !== undefined) memberHolding(draft, given.person, given.key);
   const card = draft.view.get("cards", id);
   if (!card) throw new NotFound("没有这张卡片");
   if (given.channel !== undefined) {
@@ -557,9 +579,17 @@ function answer(draft: Draft, id: number, given: Row) {
     } else if (allowed && !allowed.includes(given.by ?? "")) throw new AuthError("这个人不能回答这张卡片");
     const delivery = draft.view.get("deliveries", `${id}:${given.channel}`);
     if (!delivery?.ref || delivery.ref !== given.ref) throw new AuthError("不是发出去的那条消息");
+  } else if (given.person !== undefined) {
+    // A member's own key. A card that isn't theirs is as missing as one never made: they can't learn which there are.
+    if (card.to !== given.person) throw new NotFound("没有这张卡片");
+    // Anything on their machine can read their key, an unattended Agent too: it mustn't answer what it asked itself.
+    if (personWorkers(draft.rules, given.person).includes(card.worker)) {
+      throw new AuthError("这张卡片是你名下的电脑上跑的一轮发的，不能用成员密钥回答：在通道里收到它的地方回答");
+    }
   } else if (card.to !== undefined) {
-    // Not through a channel, it's the owner's key or a link, and neither is them. The owner can still take it back.
-    throw new AuthError(`这张卡片是发给 ${card.to} 的，只有他在通道里能回答；不用他决定了就结案（resolve）`);
+    // Not through a channel or their key, it's the owner's key or a link, and neither is them. The owner can still take
+    // it back.
+    throw new AuthError(`这张卡片是发给 ${card.to} 的，只有他本人能回答；不用他决定了就结案（resolve）`);
   }
   if (card.state !== "open") return { changed: false, state: card.state };
   if (given.by !== undefined && (typeof given.by !== "string" || [...given.by].length > ANSWER_BY)) {
@@ -743,6 +773,8 @@ const CONTROL = {
     for (const id of [...events].sort((a, b) => a - b)) {
       const event = draft.view.get("events", id);
       if (!event || !JSON.parse(event.paused ?? "[]").includes(name) || taken(id)) continue;
+      // A member's message is the rule's to take only while its sender is registered and the rule takes from them.
+      if (!takesFrom(draft.rules, rule, event.from)) continue;
       runs.add(enqueue(draft, rule, id, rule.parallel ? event.subject : ""));
       replayed.push(id);
     }
@@ -777,6 +809,10 @@ const CONTROL = {
 const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
   rules(draft, rules) {
     put(draft, "config", "rules", { value: rules, version: draft.seq });
+    // Someone taken out of the file loses their key with it: whoever is registered under that id next isn't them.
+    for (const key of rows(draft.view, "keys", { kind: "person" })) {
+      if (!personOf(rules, key.name)) set(draft, "keys", `person:${key.name}`, null);
+    }
     for (const run of rows(draft.view, "runs", { state: "queued" })) {
       if (ruleOf(rules, run.rule)) assignQueued(draft, run);
       else stopRun(draft, run, "rule-gone", ...ruleGone(run.rule));
@@ -784,14 +820,28 @@ const HANDLERS: Record<string, (draft: Draft, ...args: any[]) => unknown> = {
     closeOpen(draft, (key) => key.startsWith("rules:"), "改好了");
   },
   rulesError: (draft, problem) => notify(draft, `rules:${digest(problem)}`, "rules.json 写错了，还在用旧规则", problem),
-  key: (draft, kind, name, hash) =>
-    void put(draft, "keys", `${kind}:${name}`, { kind, name, hash, created_at: draft.at }),
+  key(draft, kind, name, hash) {
+    // A member's key is who they are, so there's none for someone rules.json doesn't register.
+    if (kind === "person" && !personOf(draft.rules, name)) {
+      throw new InputError(`rules.json 的 people 里没有登记 ${name}，先登记这个人再给他密钥`);
+    }
+    put(draft, "keys", `${kind}:${name}`, { kind, name, hash, created_at: draft.at });
+  },
   removeKey: (draft, kind, name) => {
     if (!draft.view.get("keys", `${kind}:${name}`)) return false;
     set(draft, "keys", `${kind}:${name}`, null);
     return true;
   },
-  ingest: (draft, source, given) => ingest(draft, source, given, true),
+  ingest(draft, source, given) {
+    // What members send comes only with their own keys: a source's key by that name would post among their messages.
+    if (source === PEOPLE && draft.rules.people !== undefined) throw new AuthError("这个来源名留给成员发的消息");
+    return ingest(draft, source, given, true);
+  },
+  /** A member's message, an event like any other. Not theirs to read back as a source reads its own. */
+  say(draft, person, key, given) {
+    memberHolding(draft, person, key);
+    return ingest(draft, PEOPLE, given, false, person);
+  },
   createCard,
   /** A task elsewhere asks you; your answer goes on like a round of a rule, where its cwd says. */
   ask(draft, name, given) {

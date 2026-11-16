@@ -4,8 +4,10 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { checkSchema } from "./schema.ts";
 
+/** `person` is the key of someone the hub's rules register, for a hub that has members; without it their doors are only
+ * checked for refusing everyone else. */
 export type Probe = {
-  keys: { source: string; worker: string; channel: string; owner: string };
+  keys: { source: string; worker: string; channel: string; owner: string; person?: string };
   eventType: string;
   answerer: string;
 };
@@ -38,7 +40,9 @@ export async function conformance(base: string, config: Probe, request: typeof f
     ["/v1/runs/1/result", {}, []],
     ["/v1/runs/1/cancel", {}, ["owner"]],
     ["/v1/runs/1/why", undefined, ["owner"]],
-    ["/v1/cards/1/answer", {}, ["owner", "channel"]],
+    ["/v1/me", undefined, ["person"]],
+    ["/v1/me/events", {}, ["person"]],
+    ["/v1/cards/1/answer", {}, ["owner", "channel", "person"]],
     ["/v1/cards/1/resolve", {}, ["owner"]],
     ["/v1/cards/1/delivered", {}, ["channel"]],
     ["/v1/cards/1/failed", {}, ["channel"]],
@@ -177,6 +181,21 @@ export async function conformance(base: string, config: Probe, request: typeof f
     abort.abort();
   }
   await call("/v1/state", keys.owner);
+  if (keys.person) {
+    const mine = await call("/v1/me", keys.person, undefined, 200, "me");
+    assert.ok(
+      mine.cards.every(({ id }: { id: number }) => id !== card.id && id !== other.id),
+      "成员看到了不是发给他的卡片",
+    );
+    await call(`/v1/cards/${card.id}/answer`, keys.person, { choice: 0 }, 404, "error");
+    const message = { id: tag, type: config.eventType };
+    await call("/v1/me/events", keys.person, { ...message, from: "someone-else" }, 400);
+    const said = await call("/v1/me/events", keys.person, message, 200, "eventAck");
+    assert.equal(said.duplicate, false);
+    assert.notEqual(said.event, accepted.event, "成员的消息和来源的事件算成了同一条");
+    assert.equal((await call("/v1/me/events", keys.person, message, 200, "eventAck")).duplicate, true);
+    await call(`/v1/events/${said.event}`, keys.source, undefined, 404, "error");
+  }
   return { checks, passed: true };
 }
 

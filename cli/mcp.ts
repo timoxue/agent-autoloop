@@ -1,4 +1,6 @@
 // `agent-autoloop mcp`: the hub's doors as MCP tools over stdio, using the keys already in this machine's config.json.
+// A machine with a member's key and not the owner's is a member's: it gets the member's tools and none of the owner's.
+import { answerCard, messageEvent } from "./me.ts";
 import { readConfig } from "../host/config.ts";
 import { eachLine } from "../host/lines.ts";
 import { versionName } from "../host/version.ts";
@@ -40,17 +42,44 @@ const specs = [
   ["run", "立即运行一条规则一轮", { rule: string, subject: string, reason: string }, ["rule"]],
 ] as const;
 
+/** What a member's own Agent gets. Each says what it can't do: the Agent reads these, not the protocol. */
+const memberSpecs = [
+  [
+    "me",
+    "看发给我（这台电脑的成员）的卡片：cards 是还等我回答的，recentCards 是最近 20 张处理过的。" +
+      "不能看别人的卡片、全局状态和日志；带 channelOnly 的卡片这里不能回答，要本人在通道里回答",
+    {},
+    [],
+  ],
+  [
+    "answer",
+    "回答一张发给我的卡片：choice 是选项的序号（从 0 开始），或者用 text 写自己的回答，两样只写一样；通知不用选，写 text 当处理说明。" +
+      "不能回答别人的卡片，也不能回答我名下的电脑自己那一轮发的卡片。回答代表成员本人的决定，要先问过他",
+    { card: positive, choice: { type: "integer", minimum: 0 }, text: string },
+    ["card"],
+  ],
+  [
+    "say",
+    "以我的名义向中台说一件事（提问、卡住了、进度、我会什么）：type 是中台规则约定的类型，text 是要说的话，" +
+      "subject 是这件事的对象（比如任务编号），同一个 id 只记一次。发的人由密钥决定，不能替别人说；不能直接派活，谁来处理由中台的规则定",
+    { type: string, text: string, subject: string, id: string },
+    ["type", "text"],
+  ],
+] as const;
+
 const usesSourceKey = (name: string) => ["emit", "tell"].includes(name);
 
 function toolsFor(config: ReturnType<typeof readConfig>) {
-  return specs
-    .filter(([name]) => (usesSourceKey(name) ? config.source : config.owner))
-    .map(([name, description, properties, required]) => ({
-      name,
-      description,
-      inputSchema: { type: "object", properties, required, additionalProperties: false },
-      annotations: { readOnlyHint: ["status", "why"].includes(name), destructiveHint: name === "stop" },
-    }));
+  const offered =
+    config.person && !config.owner
+      ? memberSpecs
+      : specs.filter(([name]) => (usesSourceKey(name) ? config.source : config.owner));
+  return offered.map(([name, description, properties, required]) => ({
+    name,
+    description,
+    inputSchema: { type: "object", properties, required, additionalProperties: false },
+    annotations: { readOnlyHint: ["status", "why", "me"].includes(name), destructiveHint: name === "stop" },
+  }));
 }
 type Tool = ReturnType<typeof toolsFor>[number];
 
@@ -68,15 +97,20 @@ function validArguments(tool: Tool, args: any) {
   return tool.name !== "answer" || (args.choice !== undefined) !== (args.text !== undefined);
 }
 
-function callTool(hub: Hub, name: Tool["name"], args: any) {
+function callTool(hub: Hub, name: Tool["name"], args: any, config: ReturnType<typeof readConfig>) {
   switch (name) {
+    case "me":
+      return hub.me();
+    case "say":
+      return hub.say(messageEvent(args.type, args.text, args));
     case "status":
       return hub.state(args.before);
     case "why":
       return hub.why(args.run);
     case "answer": {
+      // With the owner's key and a member's both here, a card is answered with whichever may answer it.
       const { card, ...answer } = args;
-      return hub.answer(card, answer);
+      return answerCard(config, card, answer);
     }
     case "resolve":
       return hub.resolve(args.card, args.reason);
@@ -113,9 +147,9 @@ export async function mcp() {
     const tool = tools.find((tool) => tool.name === params?.name);
     const args = params?.arguments ?? {};
     if (!tool || !validArguments(tool, args)) return refuse(id, -32602, "工具名或参数不正确");
-    const hub = hubClient(config.url, usesSourceKey(tool.name) ? config.source!.key : config.owner!);
     try {
-      const result = await callTool(hub, tool.name, args);
+      const key = usesSourceKey(tool.name) ? config.source!.key : (config.owner ?? config.person!.key);
+      const result = await callTool(hubClient(config.url, key), tool.name, args, config);
       reply(id, { result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
     } catch (error) {
       reply(id, { result: { isError: true, content: [{ type: "text", text: (error as Error).message }] } });

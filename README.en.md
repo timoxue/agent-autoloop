@@ -129,6 +129,8 @@ Besides `ask`, receipts can send notifications (`notice`), resolve open cards (`
 
 Cards go to you by default. To let an agent send a card to someone else (say, hand a task to a teammate and wait for them to accept), register those people and their addresses on a channel in `rules.json`, and say in the rule whom it may name. The agent then writes `to` in an `ask` or `notice`; only that person's own click in the channel counts, neither your key nor an answer link can answer for them, and you can only withdraw the card. See the [protocol](docs/protocol.md#发给某个人).
 
+Each registered person can also have a member key of their own and work from their own computer: `agent-autoloop me` shows the cards sent to them, `answer` answers one, and `say` tells the hub something (a question, a blocker, progress), which a rule you write hands to an agent; `agent-autoloop mcp` gives the same three tools to their own command-line agent. A member sees and answers only their own cards and can't speak as anyone else. So far this has only been verified with local tests. See the [protocol](docs/protocol.md#成员看发给自己的回答说一件事).
+
 ## Ready-to-use recipes
 
 Each recipe includes sample rules and setup instructions (written in Chinese).
