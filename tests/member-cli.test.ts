@@ -8,7 +8,10 @@
 // missing service a fault, or doesn't notice a dead key; `service install` there (which running the installer again to
 // update does) sets up a service that starts nothing over and over; MCP on a member's machine offers the owner's tools, runs one it
 // doesn't offer, or doesn't say what a member can't do; `check` passes in silence a rules file where a card for someone
-// can only ever be seen with a key nobody was told to make, or where a member's message can't be answered to them.
+// can only ever be seen with a key nobody was told to make, or where a member's message can't be answered to them, or
+// where a machine named as someone's own is no Agent's, so the guard on it never applies. With the owner's key beside
+// a member's that no longer works, the owner can't answer their own cards; a member's card answered a second time is
+// refused where it used to say it was already done.
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -24,7 +27,11 @@ const base = {
   timezone: "Asia/Shanghai",
   sources: { app: { name: "应用" } },
   agents: { a1: { name: "甲", worker: "w1", use: "claude" } },
-  people: { alice: { name: "前端 A" }, bob: { name: "后端 B" }, carol: { name: "测试 C", workers: ["w1"] } },
+  people: {
+    alice: { name: "前端 A" },
+    bob: { name: "后端 B" },
+    carol: { name: "测试 C", workers: ["w1", "w-typo"] },
+  },
   rules: [
     {
       name: "指派",
@@ -88,6 +95,8 @@ const me = (key: string) => fetch(`${url}/v1/me`, { headers: { authorization: `B
 let n = 0;
 /** A round of 指派 that asks: one card for `to`, or for the owner. */
 function asked(to?: string) {
+  // What earlier answers queued is done with first, so the next claim is this one.
+  for (let left; (left = hub.claimNext("w1", `left-${++n}`));) hub.finish(left.run, left.token, { outcome: "done" });
   hub.ingest("app", { id: `e${++n}`, type: "assign.new", subject: `#${n}` });
   const job = hub.claimNext("w1", `c${n}`)!;
   const ask = { title: "接这个任务吗", text: "登录页改版", options: ["接", "退回"], recommend: 0, ...(to && { to }) };
@@ -181,6 +190,8 @@ test("check points out who only a key reaches, and a rule that takes members' me
   assert.match(checked.stdout, /规则没问题/);
   assert.match(checked.stdout, /bob（后端 B）.*key new person bob/);
   assert.match(checked.stdout, /carol（测试 C）写了 workers 却没有通道地址/);
+  assert.match(checked.stdout, /carol（测试 C）的 workers 里的 w-typo 不是任何 Agent 的接单电脑/);
+  assert.ok(!checked.stdout.includes("里的 w1 不是"));
   assert.match(checked.stdout, /规则「成员提问」.*people/);
   assert.ok(!checked.stdout.includes("规则「指派」"), "a rule that may name everyone has nothing to be told");
 });
@@ -191,6 +202,25 @@ test("with the owner's key and a member's side by side, each card is answered wi
   assert.equal((await cli(both, "answer", String(his), "1")).code, 0);
   assert.equal((await cli(both, "answer", String(owners), "1")).code, 0);
   assert.deepEqual([stored(his).by, stored(owners).by], ["bob", "本人"]);
+});
+
+test("a member's key that no longer works doesn't keep the owner's from answering, and answering twice is as it was", async () => {
+  const stale = machine("stale", { url, owner: ownerKey, person: { id: "bob", key: "taken-back" } });
+  const owners = asked();
+  const answered = await cli(stale, "answer", String(owners), "1");
+  assert.equal(answered.code, 0, answered.stderr);
+  assert.deepEqual([stored(owners).state, stored(owners).by], ["decided", "本人"]);
+
+  const both = machine("both-twice", { url, owner: ownerKey, person: { id: "bob", key: bobKey } });
+  const his = asked("bob");
+  assert.equal((await cli(both, "answer", String(his), "1")).code, 0);
+  const again = await cli(both, "answer", String(his), "2");
+  assert.equal(again.code, 0, again.stderr);
+  assert.match(again.stdout, /已经处理过/);
+  assert.equal(stored(his).choice, 0);
+  const others = await cli(both, "answer", String(asked("alice")), "1");
+  assert.equal(others.code, 1);
+  assert.match(others.stderr, /发给 alice/, "what the owner's key was told, not a card that isn't there");
 });
 
 test("status and doctor on a member's machine say what a member can do there", async () => {

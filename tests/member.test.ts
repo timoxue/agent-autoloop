@@ -12,7 +12,12 @@
 // source posts among their messages or reads them back; a rules file that can't work is loaded (a sender filter on a
 // source's rule, an unknown sender, a receipt allowed to emit as members), or one without people changes meaning; the
 // owner's count of what waits for them includes cards only someone else can answer, and `status` says "you chose" of what
-// a member chose.
+// a member chose. Between two moments something changed and the later one went by the earlier: a card's machine is worked
+// out afterwards from a run that has since been handed to another machine, so a card the member's own machine made
+// becomes theirs to answer by key; a member removed, or whose key was taken back or replaced, while their request's body
+// was still coming, has it go through; what a pause skipped is handed over on replay though its sender is gone or the
+// rule no longer takes from them; someone new registered under an id that was someone else's is let in by the old key.
+// A file that registers no one and emits to its own source called people no longer loads.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -63,6 +68,7 @@ setup("member", rulesFile);
 const hub = await import("./hub.ts");
 const { addKey, answer, claimNext, delivered, finish, ingest, nextCard } = hub;
 const { serve } = await import("../host/http.ts");
+const { makeHandler } = await import("../host/server.ts");
 const { InputError } = await import("../kernel/errors.ts");
 const { all, one } = await import("./storage.ts");
 
@@ -84,6 +90,24 @@ after(() => {
   server.closeAllConnections();
   server.close();
 });
+// The doors without a socket, to hold a request between its key being read and its body arriving.
+const direct = makeHandler();
+after(direct.close);
+/** A POST whose key the door has seen and whose body hasn't come yet: `send` delivers it. */
+function held(path: string, key: string) {
+  let send!: (body: unknown) => void;
+  const body = new ReadableStream({
+    start(controller) {
+      send = (given) => {
+        controller.enqueue(new TextEncoder().encode(JSON.stringify(given)));
+        controller.close();
+      };
+    },
+  });
+  const init = { method: "POST", headers: { authorization: `Bearer ${key}` }, body, duplex: "half" };
+  const answered = direct.handle(new Request(`http://local${path}`, init as RequestInit));
+  return { send, answered };
+}
 
 async function call(path: string, key: string, body?: unknown, method = body === undefined ? "GET" : "POST") {
   const response = await fetch(url + path, {
@@ -162,7 +186,13 @@ test("rules.json: someone no channel reaches is fine, and who a rule takes messa
   }
   const plain = { sources: { people: { name: "人事系统" } }, agents: base.agents, rules: [] as object[] };
   plain.rules.push(rule("旧规则", { source: "people", types: ["hire.*"] }));
-  const old = parseRules(JSON.stringify(plain), 0, "UTC");
+  // What it could always write: a receipt emitting to that source, and a task elsewhere under it.
+  plain.rules.push(rule("转一手", { cron: "0 9 * * *" }, { emits: { source: "people", types: ["hire.new"] } }));
+  const elsewhere = [{ name: "别处", source: "people", to: "a1", cron: "0 6 * * 0", where: "别处" }];
+  const old = parseRules(JSON.stringify({ ...plain, elsewhere }), 0, "UTC");
+  const filtered = structuredClone(plain);
+  (filtered.rules[0] as any).when.from = ["*"];
+  assert.throws(() => parseRules(JSON.stringify(filtered), 0, "UTC"), /from/, "no senders there to filter by");
   assert.equal(old.sources.people.name, "人事系统", "a file that registers no one keeps a source of that name");
   const none = parseRules(JSON.stringify({ sources: {}, agents: base.agents, rules: [] }), 0, "UTC");
   assert.deepEqual(Object.keys(none.sources), ["schedule"], "and gains no source it didn't write");
@@ -176,6 +206,9 @@ test("a hub that registers no one still takes events from a source it calls peop
     assert.deepEqual(ingest("people", { id: "h1", type: "hire.new" }).routed, ["入职"]);
   } finally {
     load(() => {});
+    // With no one registered there was no one for a key to be: they went with the people.
+    keys.alice = addKey("person", "alice");
+    keys.bob = addKey("person", "bob");
   }
   assert.equal(all("SELECT id FROM runs WHERE rule = '入职' AND state = 'queued'").length, 0, "gone with its rule");
 });
@@ -330,7 +363,7 @@ test("a member's message is an event from them: the key says who, and its words 
     ["成员", "question", "T-1", words.detail],
   );
   const prompt = promptFor(job, "/tmp/context.json");
-  assert.match(prompt, /bob（后端 B）/);
+  assert.ok(prompt.includes("，bob（后端 B）发的"), "the line for his message says who sent it");
   assert.ok(
     !prompt.includes(words.summary) && !prompt.includes(words.detail),
     "what he wrote is data, not instructions",
@@ -368,13 +401,11 @@ test("a member's message is recorded once, two members' under one id are two, an
   finish(job.run, job.token, { outcome: "done" });
 });
 
-test("a rule takes messages only from the members it names, and never from someone not registered", async () => {
+test("a rule takes messages only from the members it names", async () => {
   const skills = (id: string) => ({ id, type: "skills", summary: "会 React" });
   assert.deepEqual((await call("/v1/me/events", keys.alice, skills("s1"))).json.routed, ["只听前端"]);
   const bobs = await call("/v1/me/events", keys.bob, skills("s1"));
   assert.deepEqual([bobs.status, bobs.json.routed], [200, []]);
-  const stranger = hub.execute("say", ["mallory", { id: "s2", type: "question" }]);
-  assert.deepEqual(stranger.routed, [], "a sender rules.json doesn't know reaches no rule, whatever it takes");
   const job = claimNext("w1", "skills")!;
   finish(job.run, job.token, { outcome: "done" });
 });
@@ -407,7 +438,13 @@ test("someone taken out of rules.json has a dead key at once, and a removed key 
   assert.equal(stored(card).state, "open");
   assert.equal((await call("/v1/me", keys.alice)).status, 200, "the others' keys go on");
   load(() => {});
-  assert.equal((await call("/v1/me", keys.bob)).status, 200, "registered again, the same key is his again");
+  assert.equal(
+    (await call("/v1/me", keys.bob)).status,
+    401,
+    "whoever is registered under that id next isn't let in by the old key",
+  );
+  keys.bob = addKey("person", "bob");
+  assert.equal((await call("/v1/me", keys.bob)).status, 200);
 
   const short = addKey("person", "bob");
   assert.equal((await call("/v1/me", keys.bob)).status, 401, "a new key for him replaces the old");
@@ -437,4 +474,81 @@ test("what waits for the owner doesn't count cards only someone else can answer,
   assert.ok(mineAt < text.indexOf("\n等别人") && theirsAt > text.indexOf("\n等别人"));
   assert.match(text, /后端 B 选了 退回/);
   assert.ok(!text.includes("你选了 退回"));
+});
+
+test("a card keeps which machine made it: handing its run to another machine doesn't make it the member's to answer", async () => {
+  ingest("app", { id: `e${++n}`, type: "own.new", subject: `#${n}` });
+  const job = claimNext("alice-mac", `c${n}`)!;
+  const notice = [{ title: "卡住了", text: "等网络", to: "alice" }];
+  finish(job.run, job.token, { outcome: "failed", error: "断网", notice });
+  const card = one<any>("SELECT id FROM cards WHERE run_id = ?", [job.run])!.id;
+  assert.equal((await call(`/v1/cards/${card}/answer`, keys.alice, {})).status, 401);
+  // The run waits to be tried again, and its Agent is moved to a machine that isn't hers.
+  load((rules) => (rules.agents.a2.worker = "w1"));
+  const after = await call(`/v1/cards/${card}/answer`, keys.alice, {});
+  assert.equal(after.status, 401, "it was her machine that made the card, wherever its run goes next");
+  assert.equal(stored(card).state, "open");
+  assert.equal((await call("/v1/me", keys.alice)).json.cards.find((open: any) => open.id === card).channelOnly, true);
+  hub.cancel(job.run);
+  hub.resolve(card, "不用了", "本人");
+  load(() => {});
+});
+
+test("a member removed, or whose key is taken back or replaced, while a request's body is still coming gets nothing through", async () => {
+  const [first, second, third] = receipt("指派", {
+    ask: [ask({ to: "bob", key: "w1" }), ask({ to: "bob", key: "w2" }), ask({ to: "bob", key: "w3" })],
+  }).map((card) => card.id);
+  const refused = async (path: string, body: unknown, change: () => void) => {
+    const request = held(path, keys.bob);
+    change();
+    request.send(body);
+    assert.equal((await request.answered).status, 401, path);
+  };
+  await refused(`/v1/cards/${first}/answer`, { choice: 0 }, () => load((rules) => delete rules.people.bob));
+  load(() => {});
+  keys.bob = addKey("person", "bob");
+  await refused(`/v1/cards/${second}/answer`, { choice: 0 }, () => hub.removeKey("person", "bob"));
+  keys.bob = addKey("person", "bob");
+  await refused(`/v1/cards/${third}/answer`, { choice: 0 }, () => (keys.bob = addKey("person", "bob")));
+  assert.deepEqual([stored(first).state, stored(second).state, stored(third).state], ["open", "open", "open"]);
+  const old = keys.bob;
+  await refused("/v1/me/events", { id: "late", type: "question" }, () => (keys.bob = addKey("person", "bob")));
+  assert.equal(all("SELECT id FROM events WHERE key = 'from:bob:late'").length, 0);
+  assert.notEqual(old, keys.bob);
+});
+
+test("a replay hands a rule only the skipped messages it would take now: not from someone gone, or no longer named", async () => {
+  const pause = (name: string) => hub.execute("pauseRule", [name, "owner", {}]);
+  const resume = (name: string) => hub.execute("resumeRule", [name]);
+  const replay = (name: string, events: number[]) => hub.execute("replayRule", [name, events]);
+  pause("成员提问");
+  pause("只听前端");
+  const hers = (await call("/v1/me/events", keys.alice, { id: "r1", type: "question", subject: "R" })).json;
+  const his = (await call("/v1/me/events", keys.bob, { id: "r1", type: "question", subject: "R" })).json;
+  const skills = (await call("/v1/me/events", keys.alice, { id: "r2", type: "skills" })).json;
+  assert.deepEqual([hers.paused, his.paused, skills.paused], [["成员提问"], ["成员提问"], ["只听前端"]]);
+  // She's taken out of rules.json, and the rule that named her names someone else.
+  load((rules) => {
+    delete rules.people.alice;
+    rules.rules[3].when.from = ["bob"];
+  });
+  resume("成员提问");
+  resume("只听前端");
+  assert.deepEqual(replay("成员提问", [hers.event, his.event]).events, [his.event]);
+  assert.deepEqual(replay("只听前端", [skills.event]).events, []);
+  // Registered again but still not named: what she said then is still not the rule's to take.
+  load((rules) => (rules.rules[3].when.from = ["bob"]));
+  assert.deepEqual(replay("只听前端", [skills.event]).events, []);
+  load(() => {});
+  keys.alice = addKey("person", "alice");
+  // Whatever earlier answers left queued goes first.
+  let job = claimNext("w1", `replayed-${++n}`)!;
+  for (; job.rule.name !== "成员提问"; job = claimNext("w1", `replayed-${++n}`)!) {
+    finish(job.run, job.token, { outcome: "done" });
+  }
+  assert.deepEqual(
+    job.context.events.map((event) => event.from?.id),
+    ["bob"],
+  );
+  finish(job.run, job.token, { outcome: "done" });
 });
