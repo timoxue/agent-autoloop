@@ -120,6 +120,45 @@ const edits: [string, string, string, string][] = [
     "facts: draft.changes.length ? [factOf(draft, draft.changes)] : [], value };",
     "facts: draft.changes.length ? [{ ...factOf(draft, draft.changes), holder } as Fact] : [], value };",
   ],
+  // A round lost and then passed: the mark when its matter is handed out again, and what its late receipt may still do.
+  ["late-passed-at-claim", "decide.ts", "    passLost(draft, run);\n", ""],
+  [
+    "late-same-matter-only",
+    "decide.ts",
+    '{ rule: run.rule, lane: run.lane, state: "unknown" }',
+    '{ rule: run.rule, state: "unknown" }',
+  ],
+  [
+    "late-same-rule-only",
+    "decide.ts",
+    '{ rule: run.rule, lane: run.lane, state: "unknown" }',
+    '{ grp: run.grp, lane: run.lane, state: "unknown" }',
+  ],
+  ["late-first-passer-kept", "decide.ts", "if (older.passed_by == null) put(", "if (true) put("],
+  ["late-newest-again-on-retry", "decide.ts", "run.passed_by == null ? {} : { passed_by: null }", "{}"],
+  ...["ask", "notice", "resolve", "later", "events"].map((what): [string, string, string, string] => [
+    `late-${what}-dropped`,
+    "decide.ts",
+    "    delete kept[what];",
+    `    if (what !== "${what}") delete kept[what];`,
+  ]),
+  [
+    "late-only-when-passed",
+    "decide.ts",
+    "run.passed_by == null ? { kept: result, dropped: [] }",
+    'run.state !== "unknown" ? { kept: result, dropped: [] }',
+  ],
+  ["late-dropped-listed", "decide.ts", "dropped.push({", "void ({"],
+  ["late-dropped-card-named", "decide.ts", '...("card" in item && { card: item.card }), what, reason', "what, reason"],
+  ["late-owner-told", "decide.ts", "if (dropped.length && !failed) {", "if (false) {"],
+  ["late-failed-untold", "decide.ts", "if (dropped.length && !failed) {", "if (dropped.length) {"],
+  [
+    "open-key-not-made-up",
+    "query.ts",
+    "return name === digest(`${card.title}\\n${card.text}`).slice(0, 32) ? undefined : name;",
+    "return name;",
+  ],
+  ["open-key-of-recipient", "query.ts", "card.to === undefined ? thread : `to:${card.to}:${thread}`", "thread"],
   ["schedule-source-door", "decide.ts", 'if (source === SCHEDULE) throw new AuthError("这个来源名留给定时");', ""],
   [
     "door-key-goes-along",
@@ -186,6 +225,8 @@ const tests = [
   "people",
   "member",
   "commit-auth",
+  "late-receipt",
+  "job-context",
 ].map((n) => `tests/${n}.test.ts`);
 export function mutate() {
   const root = join(import.meta.dirname, "..");

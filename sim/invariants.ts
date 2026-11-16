@@ -43,6 +43,59 @@ export function replay(log: Fact[]): Snapshot {
 export function admitted(good: boolean) {
   assert.ok(good, "用已经作废的密钥或打不开的链接提交成了");
 }
+const REQUESTS = ["ask", "notice", "resolve", "later", "events"];
+/**
+ * What a receipt may have written, by whether its round was still the one its matter was last handed to. `passer` is
+ * the first round the matter was handed to after this one, by the caller's own record of the claims it saw, in the
+ * order it saw them, and nothing the hub keeps or works out; none when this is still the newest. A round that a newer
+ * one has passed leaves the matter as the newer one has it: no look-again booked, moved or cancelled, no card made or
+ * closed, no event sent, and each thing it asked for turned down, naming that round. One that wasn't passed has its
+ * look-agains in effect.
+ */
+export function settled(
+  facts: Fact[],
+  before: Snapshot,
+  run: number,
+  passer: number | undefined,
+  result: Row,
+  ack: Row,
+) {
+  const changes = facts.flatMap((fact) => fact.changes);
+  const { rule, lane } = before.tables.runs[run];
+  const own = (row?: Row | null) => row?.rule === rule && row?.lane === lane;
+  if (passer === undefined) {
+    if (result.outcome !== "done") return;
+    for (const later of result.later ?? []) {
+      const key = (row?: Row | null) => own(row) && row!.key === later.key && row!.event_id === null;
+      const written = changes.filter(
+        ({ table, key: id, row }) => table === "timers" && key(row ?? before.tables.timers[id]),
+      );
+      const stands = later.cancel ? written.every(({ row }) => row === null) : written.some(({ row }) => row !== null);
+      assert.ok(stands, "没被超过的一轮，回执里的复查没生效");
+    }
+    return;
+  }
+  for (const { table, key, row } of changes) {
+    const was = before.tables[table][key];
+    if (table === "timers" && own(row ?? was))
+      // One that already came due is cleared when its round ends, and was never the matter's to wait on.
+      assert.ok(was && was.event_id !== null && row === null, "迟到的回执改了事项的复查");
+    if (table === "events") assert.ok(was, "迟到的回执发出了事件");
+    if (table !== "cards" || !row) continue;
+    // What the hub itself says about the run is the run's own.
+    if (!was) assert.ok(row.run_id !== run || row.key.startsWith(`run:${run}:`), "迟到的回执发出了卡片");
+    else if (was.state === "open" && row.state === "closed")
+      assert.notEqual(row.by, `第 ${run} 轮`, "迟到的回执结掉了卡片");
+  }
+  const asked = REQUESTS.reduce((count, what) => count + (result[what]?.length ?? 0), 0);
+  if (result.outcome === "cancelled") return;
+  const named = ack.rejected.filter((item: Row) => item.reason.includes(`第 ${passer} 轮`));
+  assert.ok(named.length >= asked, "迟到的回执没说清哪些没生效、事项交给了哪一轮");
+  // One that failed runs again; one that ended has lost what it asked for, and the owner has to hear of it.
+  const told = (row?: Row | null) => row?.key === `run:${run}:late` && row.state === "open";
+  const hears = changes.some(({ table, row }) => table === "cards" && told(row)) || rows(before, "cards").some(told);
+  if (asked && result.outcome !== "failed") assert.ok(hears, "迟到的回执丢了东西，没告诉本人");
+}
 export function invariants(current: View, log: Fact[], before?: Snapshot) {
   const view = snapshot(current);
   assert.deepEqual(view, replay(log), "日志重放记录不同");
