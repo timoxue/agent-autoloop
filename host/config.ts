@@ -1,5 +1,6 @@
 // What this machine is in the system: config.json, private to its owner. On a machine that runs everything it has all
-// of these; a machine that only does work has the hub's address and a worker's key.
+// of these; a machine that only does work has the hub's address and a worker's key; a member's own machine has the
+// address and the member's key.
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { HOME } from "./home.ts";
@@ -13,9 +14,15 @@ export type Config = {
   channels?: Record<string, ChannelConfig>;
   source?: { name: string; key: string };
   owner?: string;
+  /** A member registered in the hub's rules.json, and the key that is them there. */
+  person?: { id: string; key: string };
 };
 
 export const CONFIG_FILE = path.join(HOME, "config.json");
+
+/** A member's own machine and nothing more: it has their key and runs nothing, so there's no service for it. */
+export const memberOnly = (config: Config) =>
+  Boolean(config.person) && !config.hub && !config.worker && !Object.keys(config.channels ?? {}).length;
 
 /** The hub's address: host:port, or [host]:port for an IPv6 address. A bare port is a mistake, not every interface. */
 export function parseListen(listen: string) {

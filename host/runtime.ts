@@ -159,7 +159,7 @@ export function stateOf(now = Date.now(), before?: number) {
   }
 }
 
-export type KeyKind = "source" | "worker" | "channel" | "owner";
+export type KeyKind = "source" | "worker" | "channel" | "owner" | "person";
 export const keepKeyHash = (kind: KeyKind, name: string, hash: string, now = Date.now()) =>
   execute("key", [kind, name, hash], now);
 

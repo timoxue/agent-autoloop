@@ -160,11 +160,14 @@ export function render(state: any, { color, columns }: { color: boolean; columns
   };
 
   const { totals } = state;
+  // What waits for the owner, and what waits for someone else: theirs to answer, the owner's only to take back.
+  const mine = state.cards.filter((card: any) => !card.to);
+  const theirs = state.cards.filter((card: any) => card.to);
   const count = (label: string, n: number, style: Style) =>
     n > 0 ? `${label} ${bold(style(String(n)))}` : dim(`${label} 0`);
   say(
     [
-      count("等你", state.cards.length, yellow),
+      count("等你", mine.length, yellow),
       count("在跑", totals.running, cyan),
       count("排队", totals.queued - totals.retrying, yellow),
       totals.retrying ? count("等重派", totals.retrying, yellow) : "",
@@ -209,8 +212,7 @@ export function render(state: any, { color, columns }: { color: boolean; columns
   }
 
   const INDENT = "       ";
-  if (state.cards.length) section(bold(yellow(`等你 ${state.cards.length}`)));
-  for (const card of state.cards) {
+  const showCard = (card: any) => {
     const label = card.kind === "ask" ? bold(yellow("决定")) : bold(magenta("留意"));
     say(`  ${label} ${dim(`#${card.id}`)} ${bold(card.title)}`);
     if (card.rule && card.rule !== card.title) say(dim(`${INDENT}来源：${card.rule}`));
@@ -224,11 +226,15 @@ export function render(state: any, { color, columns }: { color: boolean; columns
         say(`${INDENT}${index + 1}. ${option}${index === card.recommend ? green("（推荐）") : ""}`);
       });
     }
-    // A card for someone is theirs to answer, where it was sent to them: the owner can only take it back.
-    if (card.to) say(dim(`${INDENT}等他在通道里回答；不用他了：agent-autoloop resolve ${card.id} <结果>`));
+    // A card for someone is theirs to answer, in a channel or with their own key: the owner can only take it back.
+    if (card.to) say(dim(`${INDENT}等他回答；不用他了：agent-autoloop resolve ${card.id} <结果>`));
     else if (card.kind === "ask") say(dim(`${INDENT}回答：agent-autoloop answer ${card.id} <序号>`));
     else say(dim(`${INDENT}处理完了：agent-autoloop answer ${card.id}`));
-  }
+  };
+  if (mine.length) section(bold(yellow(`等你 ${mine.length}`)));
+  mine.forEach(showCard);
+  if (theirs.length) section(heading(`等别人 ${theirs.length}`));
+  theirs.forEach(showCard);
 
   const because = (event: { source: string; type: string; subject: string; summary: string }) => {
     if (event.type === "card.answered") return `你回答了卡片「${event.summary}」`;
@@ -273,8 +279,11 @@ export function render(state: any, { color, columns }: { color: boolean; columns
     say(`  ${dim(pad(`#${card.id}`, cardRoom))} ${style(pad(label, 6))} ${bold(title)}`);
     const indent = " ".repeat(width(before));
     const parts: [string, Style][] = [];
-    if (card.choice !== null && card.choice !== undefined) parts.push([`你选了 ${card.options[card.choice]}`, green]);
-    if (card.answer) parts.push([`你说：${card.answer}`, (text) => text]);
+    // Whoever a card was for is the one who decided it.
+    const who = card.to?.name ?? "你";
+    const chose = card.to ? `${who} 选了` : "你选了";
+    if (card.choice !== null && card.choice !== undefined) parts.push([`${chose} ${card.options[card.choice]}`, green]);
+    if (card.answer) parts.push([`${who}说：${card.answer}`, (text) => text]);
     // A notice dealt with says so already in its label.
     if (card.result && card.result !== "已处理") parts.push([unlinked(card.result), (text) => text]);
     else if (card.state === "decided") parts.push(["Agent 接着在做", dim]);
@@ -301,7 +310,8 @@ export function render(state: any, { color, columns }: { color: boolean; columns
   const unrouted = state.unrouted.slice(0, 5);
   if (unrouted.length) section(heading("没有规则接的事件"));
   for (const event of unrouted) {
-    const words = `${sourceName(event.source)} ${event.type} ${event.subject}`;
+    // A member's message says who sent it.
+    const words = `${sourceName(event.source)}${event.from ? `（${event.from}）` : ""} ${event.type} ${event.subject}`;
     say(`  ${yellow(words)}${event.summary ? dim(`：${event.summary}`) : ""}`);
   }
   return out.join("\n");

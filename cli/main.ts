@@ -7,7 +7,7 @@ import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { hubClient } from "../protocol/client.ts";
 import { parseRules } from "../protocol/rules.ts";
-import { CONFIG_FILE, readConfig, writeConfig, type Config } from "../host/config.ts";
+import { CONFIG_FILE, memberOnly, readConfig, writeConfig, type Config } from "../host/config.ts";
 import { HOME, RULES_FILE } from "../host/home.ts";
 import { findOnPath, psQuote } from "../host/command.ts";
 import { privateDirectory } from "../host/files.ts";
@@ -44,6 +44,9 @@ const HELP = `Agent 自动化中台
                                     列出做完的轮次，可以只看一条规则、往前翻；细节再用 why
   agent-autoloop answer <卡片> [序号] [--text 别的想法]
                                     回答一张卡片；通知不用写序号
+  agent-autoloop me [--json]             成员用：发给我的卡片，等我回答的和最近处理过的
+  agent-autoloop say <类型> [--subject 对象] [--id 编号] <要说的话>
+                                    成员用：向中台说一件事（提问、卡住了、进度、会什么），由规则派给 Agent 处理
   agent-autoloop resolve <卡片> <结果>   这件事不用决定了，写一句结果
   agent-autoloop doctor                  查哪里没配好
   agent-autoloop check [文件]            检查规则文件，不碰中台；不写文件就查 rules.json
@@ -65,12 +68,16 @@ const HELP = `Agent 自动化中台
   agent-autoloop stop <第几轮>           停掉一轮
   agent-autoloop key new <source|worker|channel|owner> <名字>
                                     新建一把密钥（只显示这一次）
+  agent-autoloop key new person <人的编号>
+                                    给 rules.json 的 people 里登记的人一把成员密钥
   agent-autoloop key list                有哪些密钥
   agent-autoloop key remove <种类> <名字>  立即收回一把密钥
   agent-autoloop add <git 地址>           安装插件，不自动更新
   agent-autoloop mcp                      用标准输入输出连接 MCP 客户端
   agent-autoloop join <中台地址> --worker <名字> --key <密钥> [--no-service]
                                     另一台电脑只接活时用
+  agent-autoloop join <中台地址> --person <人的编号> --key <成员密钥>
+                                    成员在自己的电脑上用：之后用 me、answer、say，或者接上 mcp
   agent-autoloop backup [目录]           备份数据库、主密钥、配置、规则和 secrets.env；不填目录就放在 ~/.agent-autoloop/backups
   agent-autoloop restore <目录> [--yes]  停掉中台后，用一次备份恢复本机数据
   agent-autoloop update                  更新到最新发布的版本
@@ -140,16 +147,19 @@ rules.json 里这个定时任务要写 cwd；你答了，中台叫醒它的 Agen
   },
   init: { flags: ["agent", "command", "port", "no-service"], usage: INIT_USAGE },
   join: {
-    flags: ["worker", "key", "no-service"],
-    usage: "用法：agent-autoloop join <中台地址> --worker <名字> --key <密钥> [--no-service]",
+    flags: ["worker", "person", "key", "no-service"],
+    usage: `用法：agent-autoloop join <中台地址> --worker <名字> --key <密钥> [--no-service]
+      agent-autoloop join <中台地址> --person <人的编号> --key <成员密钥>`,
   },
   key: {
     flags: [],
     usage: `用法：agent-autoloop key new <source|worker|channel|owner> <名字>
+      agent-autoloop key new person <人的编号>
       agent-autoloop key list
       agent-autoloop key remove <种类> <名字>`,
   },
   mcp: { flags: [], usage: "用法：agent-autoloop mcp" },
+  me: { flags: ["json"], usage: "用法：agent-autoloop me [--json]" },
   pause: {
     flags: ["reason", "until"],
     usage: "用法：agent-autoloop pause <规则> [--reason 原因] [--until 时间]",
@@ -165,6 +175,11 @@ rules.json 里这个定时任务要写 cwd；你答了，中台叫醒它的 Agen
   rules: { flags: [], usage: "用法：agent-autoloop rules explain [文件]" },
   runs: { flags: ["before", "json"], usage: RUNS_USAGE },
   run: { flags: ["subject", "reason"], usage: "用法：agent-autoloop run <规则> [--subject 对象] [--reason 说明]" },
+  say: {
+    flags: ["subject", "id"],
+    usage: `用法：agent-autoloop say <类型> [--subject 对象] [--id 编号] <要说的话>
+要说的话也可以从标准输入传。类型由中台的规则定，比如 question、blocked、progress；同一个 --id 只记一次。`,
+  },
   service: { flags: [], usage: "用法：agent-autoloop service install|remove" },
   status: { flags: ["json"], usage: STATUS_USAGE },
   stop: { flags: [], usage: "用法：agent-autoloop stop <第几轮>" },
@@ -213,7 +228,21 @@ function refuseUnknownFlags(args: string[], { flags: known, usage }: { flags: st
 
 const client = (key: string, config = readConfig()) => hubClient(config.url, key);
 const ownerClient = (config = readConfig()) =>
-  client(config.owner ?? fail("这台电脑上没有本人的密钥（只接活的电脑看不了）"), config);
+  client(
+    config.owner ??
+      fail(
+        config.person
+          ? "这台电脑上只有成员的密钥：看发给你的卡片用 agent-autoloop me，回答用 answer，有话要说用 say"
+          : "这台电脑上没有本人的密钥（只接活的电脑看不了）",
+      ),
+    config,
+  );
+const memberClient = (config = readConfig()) =>
+  client(
+    config.person?.key ??
+      fail("这台电脑上没有成员的密钥：先 agent-autoloop join <中台地址> --person <编号> --key <密钥>"),
+    config,
+  );
 
 /** The first rules of a new install: its agents and one rule to try the whole loop with. */
 function starterRules(agents: Record<string, object>, first: string) {
@@ -383,12 +412,45 @@ async function init(args: string[]) {
   console.log(`装好了。\n  Agent：${names.join("、")}\n${reach}  规则：${RULES_FILE}\n\n${next}`);
 }
 
+/**
+ * A member's own machine: the hub's address and the key that is them there. The hub is asked first whose key it is, so
+ * a wrong one never gets as far as a config. Nothing runs here for it, so there's no service. A machine already on this
+ * hub gains the key and keeps what it has.
+ */
+async function joinAsMember(url: string, id: string, key: string) {
+  const existing = existsSync(CONFIG_FILE) ? readConfig() : undefined;
+  if (existing && (existing.url.replace(/\/$/, "") !== url.replace(/\/$/, "") || existing.person)) {
+    return fail(`已经配置过了：${CONFIG_FILE}。为防止覆盖现有设置，请先备份并手动修改配置。`);
+  }
+  const { me } = await hubClient(url, key)
+    .me()
+    .catch((error) =>
+      fail(
+        error.status === 401
+          ? "中台不认这把密钥：密钥不对、已经收回，或者 rules.json 的 people 里没有这个人"
+          : plainly(error),
+      ),
+    );
+  if (me.id !== id) return fail(`这把密钥是 ${me.id}（${me.name}）的，不是 ${id} 的`);
+  writeConfig({ ...(existing ?? { url }), person: { id, key } });
+  console.log(`连上了：你是 ${me.name}（${id}）。看发给你的卡片：${howToRun()} me`);
+  if (existing?.worker) {
+    console.log(
+      "注意：这台电脑也在接活。它跑的 Agent 和你是同一个系统账号，读得到这把成员密钥，能替你看、替你说、替你回答卡片；" +
+        "中台只挡得住一种：rules.json 里把这台电脑写进你的 workers 后，它自己那一轮发给你的卡片不能用这把密钥回答。" +
+        "要隔离，接活用单独的系统账号，或者不在这台电脑上存成员密钥。",
+    );
+  }
+}
+
 async function join(args: string[]) {
   const { named, rest } = flags(args);
   const [url] = rest;
   const name = text(named.worker);
+  const person = text(named.person);
   const key = text(named.key);
-  if (!url || !name || !key) return fail(TAKES.join.usage);
+  if (url && person && key && !name && !named["no-service"]) return joinAsMember(url, person, key);
+  if (!url || !name || !key || person) return fail(TAKES.join.usage);
   // Joining another hub must not silently replace this machine's existing hub, worker or owner keys.
   if (existsSync(CONFIG_FILE)) {
     return fail(`已经配置过了：${CONFIG_FILE}。为防止覆盖现有设置，请先备份并手动修改配置。`);
@@ -502,7 +564,8 @@ async function answer(args: string[]) {
   const card = Number(rest[0]);
   if (!Number.isInteger(card) || card < 1) return fail(TAKES.answer.usage);
   const words = text(named.text);
-  const done = await ownerClient().answer(card, {
+  const { answererFor } = await import("./me.ts");
+  const done = await ((await answererFor(readConfig(), card)) ?? ownerClient()).answer(card, {
     ...(rest[1] !== undefined && { choice: Number(rest[1]) - 1 }),
     ...(words && { text: words }),
   });
@@ -513,6 +576,36 @@ async function answer(args: string[]) {
         ? "结案了。"
         : "收到，Agent 接着干。",
   );
+}
+
+async function me(named: Flags) {
+  const mine = await memberClient().me();
+  if (named.json !== undefined) return console.log(JSON.stringify(mine, null, 2));
+  const { renderMine } = await import("./me.ts");
+  console.log(renderMine(mine));
+}
+
+/** A member tells the hub something. Its first word is the type; the rest is theirs, from the arguments or stdin. */
+async function say(args: string[]) {
+  const { named, rest } = flags(args);
+  const [type, ...spoken] = rest;
+  if (!type) return fail(TAKES.say.usage);
+  const hub = memberClient();
+  let words = spoken.join(" ");
+  // Nothing typed and nothing piped in is nothing said; an input already closed reads as an error on Windows.
+  if (!words && !process.stdin.isTTY) {
+    try {
+      words = readFileSync(0, "utf8");
+    } catch {}
+  }
+  words = words.trim();
+  if (!words) return fail(`要说的话不能为空。\n\n${TAKES.say.usage}`);
+  const { messageEvent } = await import("./me.ts");
+  const answer = await hub.say(messageEvent(type, words, { subject: text(named.subject), id: text(named.id) }));
+  if (answer.duplicate) return console.log("这条已经说过了，这次没再记。");
+  const paused = answer.paused?.length ? `暂停中没接：${answer.paused.join("、")}` : "";
+  if (answer.routed.length) console.log(`说了，交给了：${answer.routed.join("、")}${paused && `；${paused}`}`);
+  else console.log(paused ? `记下了，${paused}。` : "记下了，没有规则接它。");
 }
 
 async function resolve(args: string[]) {
@@ -616,7 +709,9 @@ async function doctor() {
       say(false, (error as Error).message);
     }
   }
-  if (serviceRunning()) say(true, "系统服务在跑");
+  // A machine with only a member's key runs nothing: there's no service to miss.
+  if (memberOnly(config)) console.log("● 成员的电脑：没有要常驻的程序，不用装系统服务");
+  else if (serviceRunning()) say(true, "系统服务在跑");
   else if (systemUnit()) say(true, "系统级服务在跑");
   else say(false, "系统服务没在跑：agent-autoloop service install");
   try {
@@ -624,6 +719,22 @@ async function doctor() {
     say(health.ok === true, `中台 ${config.url}（${String(health.commit).slice(0, 12)}）`);
   } catch (error) {
     say(false, `连不上中台 ${config.url}：${(error as any).cause?.code ?? (error as Error).message}`);
+  }
+  if (config.person) {
+    try {
+      const { me } = await memberClient(config).me();
+      say(me.id === config.person.id, `成员 ${me.name}（${me.id}）的密钥可以用`);
+    } catch (error) {
+      say(
+        false,
+        `成员密钥用不了：${plainly(error)}（密钥收回了，或者 rules.json 的 people 里没有 ${config.person.id} 了）`,
+      );
+    }
+    if (config.worker) {
+      console.log(
+        "○ 这台电脑既接活又存着成员密钥：它跑的 Agent 读得到这把密钥。要隔离，接活用单独的系统账号，或者不在这里存成员密钥。",
+      );
+    }
   }
   if (config.owner) {
     try {
@@ -674,10 +785,12 @@ function checkRulesFile(file: string) {
   return parseRules(json, Date.now(), Intl.DateTimeFormat().resolvedOptions().timeZone);
 }
 
-function check(args: string[]) {
+async function check(args: string[]) {
   const file = path.resolve(args[0] ?? RULES_FILE);
-  checkRulesFile(file);
+  const rules = checkRulesFile(file);
   console.log(`规则没问题：${file}`);
+  const { peopleHints } = await import("./explain.ts");
+  for (const hint of peopleHints(rules)) console.log(`提示：${hint}`);
 }
 
 async function key(args: string[]) {
@@ -693,8 +806,8 @@ async function key(args: string[]) {
     for (const row of listKeys()) console.log(`${row.kind} ${row.name} ${row.created_at}`);
     return;
   }
-  if (action !== "new" || !["source", "worker", "channel", "owner"].includes(kind) || !name) {
-    return fail("用法：agent-autoloop key new <source|worker|channel|owner> <名字>");
+  if (action !== "new" || !["source", "worker", "channel", "owner", "person"].includes(kind) || !name) {
+    return fail(TAKES.key.usage);
   }
   console.log(addKey(kind as "source", name));
 }
@@ -865,6 +978,11 @@ function plainly(error: any): string {
 
 async function service(args: string[]) {
   if (args[0] === "install") {
+    // Running the installer again to update comes here too: on a member's machine a service would start nothing, over
+    // and over.
+    if (existsSync(CONFIG_FILE) && memberOnly(readConfig())) {
+      return console.log("这台电脑只有成员的密钥，没有要常驻的程序，不用装系统服务。");
+    }
     // Installing over kept data comes here and not to init, and uninstalling took the links away.
     linkSkill();
     installService();
@@ -921,6 +1039,8 @@ const commands: Record<string, () => unknown> = {
   runs: () => runs(args),
   conformance: () => checkConformance(args),
   answer: () => answer(args),
+  me: () => me(flags(args).named),
+  say: () => say(args),
   resolve: () => resolve(args),
   doctor,
   check: () => check(args),
