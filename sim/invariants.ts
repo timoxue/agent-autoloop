@@ -62,18 +62,35 @@ export function invariants(current: View, log: Fact[], before?: Snapshot) {
         links.some((l) => l.event_id === e.id && view.tables.runs[l.run_id]?.rule === rule),
         "已收事件丢了派发关系",
       );
-  const { people } = view.tables.config.rules.value;
-  for (const e of events.filter((e) => e.from !== undefined)) {
-    // What a member sent: kept under their id, at the top of its chain, and taken only by rules that take messages
-    // from them, none at all when rules.json doesn't know them. (The rules never change in a simulated world.)
-    assert.ok(e.source === "people" && e.key.startsWith(`from:${e.from}:`) && e.hops === 0, "成员消息记错了");
-    for (const name of JSON.parse(e.routed)) {
-      assert.ok(Object.hasOwn(people ?? {}, e.from), "没登记的发件人的消息派出去了");
-      const when = view.tables.config.rules.value.rules.find((r: Row) => r.name === name)?.when;
-      assert.ok(
-        when?.source === "people" && (when.from ?? ["*"]).some((id: string) => id === "*" || id === e.from),
-        "成员消息派给了不收这个发件人的规则",
-      );
+  // What a member sent: kept under their id and at the top of its chain; and whenever a rule took it, as it came or on
+  // a replay, the rules as they stood then registered the sender and had that rule take from them. Read from the log,
+  // fact by fact, as the rules change.
+  let config: Row | undefined;
+  const takes = (name: string, from: string) => {
+    const when = config?.rules.find((r: Row) => r.name === name)?.when;
+    const named = when?.source === "people" && (when.from ?? ["*"]).some((id: string) => id === "*" || id === from);
+    return named && Object.hasOwn(config?.people ?? {}, from);
+  };
+  const sent = new Map<number, Row>();
+  for (const fact of log) {
+    for (const { table, key, row } of fact.changes) {
+      if (table === "config" && key === "rules") config = row!.value;
+      if (table === "events" && row?.from !== undefined && !sent.has(row.id)) {
+        sent.set(row.id, row);
+        assert.ok(
+          row.source === "people" && row.key.startsWith(`from:${row.from}:`) && row.hops === 0,
+          "成员消息记错了",
+        );
+        for (const name of JSON.parse(row.routed).filter((r: string) => !JSON.parse(row.paused ?? "[]").includes(r)))
+          assert.ok(takes(name, row.from), "成员消息派给了不收这个发件人的规则");
+      }
+      if (fact.type === "replayRule" && table === "run_events" && row && sent.has(row.event_id)) {
+        const rule = fact.changes.find((c) => c.table === "runs" && c.row?.id === row.run_id)?.row?.rule;
+        assert.ok(
+          takes(rule ?? view.tables.runs[row.run_id]?.rule, sent.get(row.event_id)!.from),
+          "补跑接了不该接的成员消息",
+        );
+      }
     }
   }
   for (const card of cards)

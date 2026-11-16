@@ -1,7 +1,10 @@
 // Failure modes: faults lose accepted events, duplicate execution or answers, exceed parallel limits, change receipts,
 // diverge from replay, or strand work after recovery; an enumerator silently skips one ordering; mutation checks do not run;
 // a card for someone decided by anyone else goes unnoticed; a member's message recorded as someone else's, or handed to
-// a rule that doesn't take it from them, goes unnoticed; the simulation never has a member look, answer or speak.
+// a rule that doesn't take it from them, goes unnoticed; the simulation never has a member look, answer or speak, or the
+// rules never change under what's in flight (someone taken out, an Agent moved to another machine, a pause and a
+// replay), so what goes by the rules of an earlier moment is never met; a replay that hands over a message from someone
+// the rules no longer take it from goes unnoticed.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { simulate } from "../sim/random.ts";
@@ -14,7 +17,7 @@ import { invariants } from "../sim/invariants.ts";
 test("200000 deterministic fault steps preserve safety and recovered work terminates", () => {
   const result = simulate(0x5eed, 200000);
   assert.equal(result.steps, 200000);
-  for (const fault of ["lost", "duplicate", "restart", "offline", "channel", "clock", "member"])
+  for (const fault of ["lost", "duplicate", "restart", "offline", "channel", "clock", "member", "rules"])
     assert.ok(result.faults[fault] > 0, fault);
   assert.ok(result.completed > 0);
   console.log(JSON.stringify(result));
@@ -82,10 +85,30 @@ test("answer checks reject a card for someone that anyone else decided", () => {
 
 test("message checks reject a member's message recorded as someone else's", () => {
   const w = new World();
-  w.call("say", "p2", { id: "m", type: "said" });
+  w.call("say", "p2", w.keys.p2, { id: "m", type: "said" });
   const log = structuredClone(w.log);
   for (const f of log) for (const c of f.changes) if (c.table === "events" && c.row?.from) c.row.from = "p1";
   assert.throws(() => invariants(evolve(new World().view, log.slice(1)), log), /成员消息/);
+});
+
+test("message checks reject a replay that hands a rule a message its sender is no longer registered for", () => {
+  const w = new World();
+  w.call("pauseRule", "three", "owner", {});
+  const { event } = w.call("say", "p2", w.keys.p2, { id: "m", type: "said" });
+  w.change({ ...w.shape, p2: false });
+  w.call("resumeRule", "three");
+  assert.deepEqual(w.call("replayRule", "three", [event]).events, []);
+  // As a hub that didn't look would have left it: a replay taken while p2 was still there, put after p2 was taken out.
+  const loose = new World();
+  loose.call("pauseRule", "three", "owner", {});
+  loose.call("say", "p2", loose.keys.p2, { id: "m", type: "said" });
+  loose.call("resumeRule", "three");
+  loose.call("replayRule", "three", [event]);
+  const log = structuredClone(loose.log);
+  const gone = structuredClone(w.log.find((f) => f.type === "rules" && f.seq > 1)!);
+  const replayed = log.pop()!;
+  log.push({ ...gone, seq: replayed.seq }, { ...replayed, seq: replayed.seq + 1 });
+  assert.throws(() => invariants(evolve(new World().view, log.slice(1)), log), /补跑/);
 });
 
 test("the simulation catches omitted deadlines that strand deferred work", () => {
