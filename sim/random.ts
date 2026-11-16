@@ -27,6 +27,8 @@ export function simulate(seed = 0x5eed, steps = 200000) {
     clock: 0,
     member: 0,
     rules: 0,
+    keys: 0,
+    link: 0,
   };
   let world = new World();
   let completed = 0;
@@ -40,7 +42,7 @@ export function simulate(seed = 0x5eed, steps = 200000) {
         receipts.length = 0;
       }
       world.advance(rng(30000));
-      const op = rng(15);
+      const op = rng(17);
       const live = rows(world.view, "runs").filter((r) => ["claimed", "unknown"].includes(r.state));
       if (op < 3) {
         const id = String(rng(16));
@@ -172,8 +174,9 @@ export function simulate(seed = 0x5eed, steps = 200000) {
         faults.rules++;
         // The rules change under what's in flight: someone is taken out or put back, an Agent moves to another machine,
         // the rule for members' messages is paused, resumed, or handed what its pause skipped.
-        const change = rng(4);
-        if (change === 0) world.change({ ...world.shape, p2: !world.shape.p2 });
+        const change = rng(5);
+        if (change === 4) world.change({ ...world.shape, links: !world.shape.links });
+        else if (change === 0) world.change({ ...world.shape, p2: !world.shape.p2 });
         else if (change === 1) world.change({ ...world.shape, aOn: world.shape.aOn === "w1" ? "w3" : "w1" });
         else if (!world.view.get("pauses", "three")) {
           if (change === 2) world.call("pauseRule", "three", "owner", {});
@@ -188,6 +191,83 @@ export function simulate(seed = 0x5eed, steps = 200000) {
               assert.ok(world.takes(world.view.get("events", id)!.from), "补跑接了现在不收的发件人的消息");
           }
         } else world.call("resumeRule", "three");
+      } else if (op === 15) {
+        faults.keys++;
+        // A door's key is taken back, or replaced by a new one under the same name, and what then comes in on the old
+        // one is refused whatever it asks for: by the simulation's own record of which key it issued last. Taken back,
+        // the door is given a new one before anyone else acts.
+        const doors = [
+          "owner:owner",
+          "source:app",
+          "worker:w1",
+          "worker:w2",
+          "worker:w3",
+          "channel:chat",
+          "channel:team",
+        ];
+        const [kind, name] = doors[rng(doors.length)].split(":");
+        const id = `${kind}:${name}`;
+        if (!world.held[id]) world.issue(kind, name);
+        if (rng(2)) world.revoke(kind, name);
+        else world.issue(kind, name);
+        const cards = rows(world.view, "cards");
+        const card = cards[rng(cards.length)]?.id ?? 1;
+        const run = rows(world.view, "runs")[0]?.id ?? 1;
+        const asked: Record<string, [string, ...any[]][]> = {
+          owner: [
+            ["answer", card, { choice: 0 }],
+            ["resolve", card, "不用了", "本人"],
+            ["cancel", run],
+            ["pauseRule", "three", "owner", {}],
+            ["resumeRule", "three"],
+            ["runRule", "one", "owner", {}],
+            ["replayRule", "three", []],
+            ["removeKey", "source", "app"],
+          ],
+          source: [["ingest", name, { id: `late-${step}`, type: "one", subject: "#0" }]],
+          worker: [
+            ["heartbeat", name, live.map((r) => r.id)],
+            ["claimNext", name, `late-${step}`],
+          ],
+          channel: [
+            ["channelSeen", name],
+            ["nextCard", name],
+            ["delivered", name, card, 1, `late-${card}`],
+            ["failed", name, card, 1, "模拟断线"],
+            [
+              "answer",
+              card,
+              { choice: 0, by: name === "chat" ? "owner" : "u1", channel: name, ref: `message-${card}` },
+            ],
+          ],
+        };
+        const [type, ...args] = asked[kind][rng(asked[kind].length)];
+        // The one just taken back or replaced, or one that died before it.
+        const key = rng(4) ? world.dead[id] : `key-${id}-${rng(world.issued) + 1}`;
+        if (key !== world.held[id]) assert.throws(() => world.callAs({ kind, name, key }, type, ...args), AuthError);
+        if (!world.held[id]) world.issue(kind, name);
+      } else if (op === 16) {
+        faults.link++;
+        // A card's link: it answers a card of the owner's while some channel takes links and its week lasts, by the
+        // simulation's own reading of the rules it wrote and of what the link is made from. It may have stopped taking
+        // links since the card went out, and a link made up, or to a card for someone, opens nothing.
+        const asks = rows(world.view, "cards").filter((c) => c.kind === "ask");
+        const card = asks[rng(asks.length)];
+        // What the clock's source records is the hub's own: a source's key by that name gets nothing in.
+        const moment = { id: `one@${new Date(world.now).toISOString()}`, type: "schedule.tick" };
+        assert.throws(() => world.call("ingest", "schedule", moment), AuthError);
+        if (card) {
+          const key = rng(3) ? world.link(card as any) : "made-up";
+          const given = { choice: rng(2), by: "链接" };
+          const holder = { kind: "link", name: String(card.id), key };
+          if (world.good({ type: "answer", args: [card.id, given], holder }))
+            assert.equal(world.callAs(holder, "answer", card.id, given).changed, card.state === "open");
+          else
+            assert.throws(
+              () => world.callAs(holder, "answer", card.id, given),
+              (e) => e instanceof AuthError || e instanceof NotFound,
+            );
+        }
       } else {
         const card = rows(world.view, "cards").find((c) => c.kind === "ask");
         if (card?.to !== undefined) assert.throws(() => world.call("answer", card.id, { choice: rng(2) }), AuthError);

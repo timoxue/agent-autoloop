@@ -38,6 +38,11 @@ export function replay(log: Fact[]): Snapshot {
   }
   return { seq, tables, next };
 }
+/** What came in on a key that was taken back or replaced, or on a link that no longer opens its card, must not have
+ * been decided. Whether it was good is the caller's own record of what it issued, not anything the hub says. */
+export function admitted(good: boolean) {
+  assert.ok(good, "用已经作废的密钥或打不开的链接提交成了");
+}
 export function invariants(current: View, log: Fact[], before?: Snapshot) {
   const view = snapshot(current);
   assert.deepEqual(view, replay(log), "日志重放记录不同");
@@ -75,6 +80,9 @@ export function invariants(current: View, log: Fact[], before?: Snapshot) {
   for (const fact of log) {
     for (const { table, key, row } of fact.changes) {
       if (table === "config" && key === "rules") config = row!.value;
+      // What the clock makes happen is the hub's own to record: nothing that came through a source's or a member's door.
+      if (table === "events" && row?.source === "schedule")
+        assert.ok(fact.type !== "ingest" && fact.type !== "say", "来源的门记下了定时的事件");
       if (table === "events" && row?.from !== undefined && !sent.has(row.id)) {
         sent.set(row.id, row);
         assert.ok(
