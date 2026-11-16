@@ -1,6 +1,7 @@
 // Failure modes: faults lose accepted events, duplicate execution or answers, exceed parallel limits, change receipts,
 // diverge from replay, or strand work after recovery; an enumerator silently skips one ordering; mutation checks do not run;
-// a card for someone decided by anyone else goes unnoticed.
+// a card for someone decided by anyone else goes unnoticed; a member's message recorded as someone else's, or handed to
+// a rule that doesn't take it from them, goes unnoticed; the simulation never has a member look, answer or speak.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { simulate } from "../sim/random.ts";
@@ -13,7 +14,7 @@ import { invariants } from "../sim/invariants.ts";
 test("200000 deterministic fault steps preserve safety and recovered work terminates", () => {
   const result = simulate(0x5eed, 200000);
   assert.equal(result.steps, 200000);
-  for (const fault of ["lost", "duplicate", "restart", "offline", "channel", "clock"])
+  for (const fault of ["lost", "duplicate", "restart", "offline", "channel", "clock", "member"])
     assert.ok(result.faults[fault] > 0, fault);
   assert.ok(result.completed > 0);
   console.log(JSON.stringify(result));
@@ -77,6 +78,14 @@ test("answer checks reject a card for someone that anyone else decided", () => {
   const log = structuredClone(w.log);
   for (const f of log) for (const c of f.changes) if (c.table === "cards" && c.row?.by) c.row.by = "owner";
   assert.throws(() => invariants(evolve(new World().view, log.slice(1)), log), /收件人/);
+});
+
+test("message checks reject a member's message recorded as someone else's", () => {
+  const w = new World();
+  w.call("say", "p2", { id: "m", type: "said" });
+  const log = structuredClone(w.log);
+  for (const f of log) for (const c of f.changes) if (c.table === "events" && c.row?.from) c.row.from = "p1";
+  assert.throws(() => invariants(evolve(new World().view, log.slice(1)), log), /成员消息/);
 });
 
 test("the simulation catches omitted deadlines that strand deferred work", () => {

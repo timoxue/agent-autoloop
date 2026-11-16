@@ -15,7 +15,8 @@ export const rules = parseRules(
       b: { name: "乙", worker: "w2", use: "command", command: ["true"] },
     },
     channels: { chat: { name: "通道", answerers: ["owner"] }, team: { name: "团队", people: true } },
-    people: { p1: { name: "成员", at: { team: "u1" } } },
+    // p1 is reached on a channel and w1 is their own machine; p2 by their key alone.
+    people: { p1: { name: "成员", at: { team: "u1" }, workers: ["w1"] }, p2: { name: "只用密钥的成员" } },
     rules: [
       {
         name: "one",
@@ -25,7 +26,7 @@ export const rules = parseRules(
         prompt: "做事",
         group: "shared",
         parallel: 2,
-        people: ["p1"],
+        people: ["p1", "p2"],
       },
       {
         name: "two",
@@ -34,6 +35,15 @@ export const rules = parseRules(
         cwd: "/tmp",
         prompt: "做事",
         group: "shared",
+        parallel: 2,
+      },
+      // Members' messages, from p2 alone.
+      {
+        name: "three",
+        when: { source: "people", types: ["said"], from: ["p2"] },
+        to: "b",
+        cwd: "/tmp",
+        prompt: "做事",
         parallel: 2,
       },
     ],
@@ -90,9 +100,11 @@ export class World {
       rows(this.view, "timers").every((t) => Date.parse(t.at) > this.now || t.event_id !== null),
       "故障停止后到期任务没被叫醒",
     );
-    // A card for someone is theirs alone: they answer it on the message sent to them, which the owner's key can't.
+    // A card for someone is theirs alone: they answer it on the message sent to them, or with their own key where no
+    // channel reaches them, which the owner's key can't.
     for (const c of rows(this.view, "cards").filter((c) => c.state === "open" && c.kind === "ask")) {
       if (c.to === undefined) this.call("answer", c.id, { choice: 0 });
+      else if (c.to === "p2") this.call("answer", c.id, { choice: 0, person: "p2" });
       else {
         const ref = this.view.get("deliveries", `${c.id}:team`)?.ref ?? `recovery-${c.id}`;
         this.call("delivered", "team", c.id, c.version, ref);

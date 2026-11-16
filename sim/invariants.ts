@@ -62,6 +62,20 @@ export function invariants(current: View, log: Fact[], before?: Snapshot) {
         links.some((l) => l.event_id === e.id && view.tables.runs[l.run_id]?.rule === rule),
         "已收事件丢了派发关系",
       );
+  const { people } = view.tables.config.rules.value;
+  for (const e of events.filter((e) => e.from !== undefined)) {
+    // What a member sent: kept under their id, at the top of its chain, and taken only by rules that take messages
+    // from them, none at all when rules.json doesn't know them. (The rules never change in a simulated world.)
+    assert.ok(e.source === "people" && e.key.startsWith(`from:${e.from}:`) && e.hops === 0, "成员消息记错了");
+    for (const name of JSON.parse(e.routed)) {
+      assert.ok(Object.hasOwn(people ?? {}, e.from), "没登记的发件人的消息派出去了");
+      const when = view.tables.config.rules.value.rules.find((r: Row) => r.name === name)?.when;
+      assert.ok(
+        when?.source === "people" && (when.from ?? ["*"]).some((id: string) => id === "*" || id === e.from),
+        "成员消息派给了不收这个发件人的规则",
+      );
+    }
+  }
   for (const card of cards)
     if (card.answer_event !== null) {
       // Whoever a card is for is the one who decided it: not the owner, a link, or someone else on the channel.

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import { rows } from "../kernel/evolve.ts";
-import { AuthError } from "../kernel/errors.ts";
+import { AuthError, NotFound } from "../kernel/errors.ts";
 import { credential } from "../kernel/credentials.ts";
-import { World, environment } from "./world.ts";
+import { fromOwnMachine, mineOf } from "../kernel/query.ts";
+import { World, environment, rules } from "./world.ts";
 
 export function random(seed: number) {
   let state = seed >>> 0;
@@ -17,7 +18,15 @@ export function random(seed: number) {
 export function simulate(seed = 0x5eed, steps = 200000) {
   const rng = random(seed);
   const start = performance.now();
-  const faults: Record<string, number> = { lost: 0, duplicate: 0, restart: 0, offline: 0, channel: 0, clock: 0 };
+  const faults: Record<string, number> = {
+    lost: 0,
+    duplicate: 0,
+    restart: 0,
+    offline: 0,
+    channel: 0,
+    clock: 0,
+    member: 0,
+  };
   let world = new World();
   let completed = 0;
   const receipts: { id: number; token: string; body: object; ack: object }[] = [];
@@ -30,7 +39,7 @@ export function simulate(seed = 0x5eed, steps = 200000) {
         receipts.length = 0;
       }
       world.advance(rng(30000));
-      const op = rng(12);
+      const op = rng(14);
       const live = rows(world.view, "runs").filter((r) => ["claimed", "unknown"].includes(r.state));
       if (op < 3) {
         const id = String(rng(16));
@@ -69,7 +78,7 @@ export function simulate(seed = 0x5eed, steps = 200000) {
                     text: "内容",
                     options: ["甲", "乙"],
                     key: `card-${r.id}`,
-                    ...(rng(2) && { to: "p1" }),
+                    ...(rng(2) && { to: rng(2) ? "p1" : "p2" }),
                   },
                 ],
                 later: [{ key: `timer-${r.id}`, at: new Date(world.now + 60000).toISOString(), about: "复查" }],
@@ -113,6 +122,30 @@ export function simulate(seed = 0x5eed, steps = 200000) {
       } else if (op === 10) {
         faults.clock++;
         world.advance(-rng(120000));
+      } else if (op === 12) {
+        faults.member++;
+        // A member with their own key: what they're shown is theirs alone, and they answer only what's for them, never
+        // what a round on their own machine asked.
+        const person = rng(2) ? "p1" : "p2";
+        const shown = mineOf(world.view, rules, environment, person);
+        for (const c of [...shown.cards, ...shown.recentCards])
+          assert.equal(world.view.get("cards", c.id)!.to, person, "成员看到了不是发给他的卡片");
+        const asks = rows(world.view, "cards").filter((c) => c.kind === "ask");
+        const card = asks[rng(asks.length)];
+        const given = { choice: rng(2), person };
+        if (!card) world.alarm();
+        else if (card.to !== person) assert.throws(() => world.call("answer", card.id, given), NotFound);
+        else if (fromOwnMachine(world.view, rules, card, person))
+          assert.throws(() => world.call("answer", card.id, given), AuthError);
+        else assert.equal(world.call("answer", card.id, given).changed, card.state === "open");
+      } else if (op === 13) {
+        faults.member++;
+        // A member says something: only the rule that takes it from them gets it, and said again it's the same event.
+        const person = rng(2) ? "p1" : "p2";
+        const message = { id: String(rng(8)), type: "said", subject: `#${rng(4)}`, hops: rng(12) };
+        const first = world.call("say", person, message);
+        assert.deepEqual([...first.routed, ...first.paused], person === "p2" ? ["three"] : []);
+        assert.deepEqual(world.call("say", person, message), { ...first, duplicate: true });
       } else {
         const card = rows(world.view, "cards").find((c) => c.kind === "ask");
         if (card?.to !== undefined) assert.throws(() => world.call("answer", card.id, { choice: rng(2) }), AuthError);
