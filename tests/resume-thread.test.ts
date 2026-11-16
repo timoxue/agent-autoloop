@@ -263,7 +263,7 @@ test("a due check doesn't open a session a round may still be running in, and st
   assert.equal(due.session, null);
   // What the lost round had taken comes along with its matter, ahead of the check.
   assert.deepEqual(
-    due.context.events.map((event) => event.type),
+    due.context.events.map((event: { type: string }) => event.type),
     ["feedback.new", "timer.due"],
   );
   it.check();
